@@ -145,6 +145,30 @@ html,body,[class*="css"]{font-family:'Inter',sans-serif;color:var(--text);}
 .stTabs [aria-selected="true"]{background:#4f6ef7!important;color:#fff!important;}
 .stDataFrame{border-radius:10px;overflow:hidden;}
 hr{border-color:var(--border);}
+
+/* ── Live toggle ── */
+[data-testid="stToggle"] > label {
+  background: var(--s2) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 20px !important;
+  padding: 6px 14px !important;
+  font-family: 'Syne', sans-serif !important;
+  font-size: .8rem !important;
+  font-weight: 700 !important;
+  color: var(--muted) !important;
+  transition: all .2s !important;
+  cursor: pointer !important;
+}
+[data-testid="stToggle"][aria-checked="true"] > label {
+  background: rgba(242,92,92,.12) !important;
+  border-color: rgba(242,92,92,.4) !important;
+  color: #f25c5c !important;
+}
+/* pulse the toggle label when on */
+@keyframes live-pulse { 0%,100%{box-shadow:0 0 0 0 rgba(242,92,92,.4)} 50%{box-shadow:0 0 0 6px rgba(242,92,92,0)} }
+[data-testid="stToggle"][aria-checked="true"] > label {
+  animation: live-pulse 2s infinite !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -279,35 +303,65 @@ with st.sidebar:
     ], label_visibility="collapsed")
 
     st.markdown('<hr style="margin:10px 0">', unsafe_allow_html=True)
-    st.markdown('<div style="font-size:.69rem;color:#555e7a;text-transform:uppercase;'
-                'letter-spacing:.08em;margin-bottom:7px">Auto-refresco</div>', unsafe_allow_html=True)
-
-    refresh_map   = {"Manual":0,"30 seg":30,"1 min":60,"2 min":120,"5 min":300}
-    refresh_label = st.selectbox("", list(refresh_map.keys()), index=1, label_visibility="collapsed")
-    refresh_secs  = refresh_map[refresh_label]
-
-    if refresh_secs > 0 and HAS_AUTOREFRESH:
-        st_autorefresh(interval=refresh_secs*1000, limit=None, key="ar")
-        st.markdown(f'<div style="font-size:.71rem;color:#22d47b;margin-top:4px">'
-                    f'<span class="ld"></span>Cada {refresh_label}</div>', unsafe_allow_html=True)
-    elif refresh_secs > 0 and not HAS_AUTOREFRESH:
-        st.caption("Instalá `streamlit-autorefresh` en requirements.txt")
-    else:
-        if st.button("🔄 Refrescar"): st.rerun()
-
     now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-    st.markdown(f'<div style="font-size:.67rem;color:#555e7a;margin-top:8px">Última carga: {now_str}</div>',
+    st.markdown(f'<div style="font-size:.67rem;color:#555e7a">Última carga: {now_str}</div>',
                 unsafe_allow_html=True)
+    if page != "🔴  Monitor en vivo":
+        st.markdown('<div style="font-size:.67rem;color:#555e7a;margin-top:4px">'
+                    '⚡ Live mode disponible en Monitor</div>', unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════
 # PAGE: MONITOR EN VIVO
 # ══════════════════════════════════════════════════════════
 if page == "🔴  Monitor en vivo":
-    st.markdown("""<h2 style="font-family:'Syne',sans-serif;font-weight:800;margin-bottom:2px">
-      <span class="ld"></span>Monitor en vivo</h2>
-    <div style="color:#555e7a;font-size:.8rem;margin-bottom:18px">Chats activos · Agentes · Tiempo real</div>
-    """, unsafe_allow_html=True)
+
+    # ── LIVE toggle bar ──────────────────────────────────
+    col_title, col_toggle, col_interval, col_refresh = st.columns([4, 1.2, 1.8, 1])
+
+    with col_title:
+        st.markdown("""<h2 style="font-family:'Syne',sans-serif;font-weight:800;margin-bottom:0;padding-top:6px">
+          Monitor en vivo</h2>""", unsafe_allow_html=True)
+
+    with col_toggle:
+        live_on = st.toggle("🔴 LIVE", value=st.session_state.get("live_on", False), key="live_on")
+
+    with col_interval:
+        refresh_opts = {"30 seg": 30, "1 min": 60, "2 min": 120, "5 min": 300}
+        if live_on:
+            chosen = st.selectbox("Intervalo", list(refresh_opts.keys()),
+                                  index=1, label_visibility="collapsed", key="live_interval")
+            refresh_secs = refresh_opts[chosen]
+        else:
+            refresh_secs = 0
+            st.markdown("")
+
+    with col_refresh:
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        if not live_on:
+            if st.button("🔄 Refrescar"):
+                st.rerun()
+
+    # ── Ejecutar autorefresh SOLO si live está ON ────────
+    if live_on and refresh_secs > 0:
+        if HAS_AUTOREFRESH:
+            st_autorefresh(interval=refresh_secs * 1000, limit=None, key="live_ar")
+            now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+            st.markdown(
+                f'<div style="font-size:.75rem;color:#22d47b;margin-bottom:12px">' +
+                f'<span class="ld"></span>Actualizando cada {chosen} · {now_str}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.warning("Instalá `streamlit-autorefresh` en requirements.txt para usar Live mode.")
+    elif live_on:
+        st.markdown("")
+    else:
+        st.markdown(
+            '<div style="font-size:.75rem;color:#555e7a;margin-bottom:12px">' +
+            'Live mode desactivado · Usá el botón 🔄 para refrescar manualmente</div>',
+            unsafe_allow_html=True,
+        )
 
     now_utc  = datetime.now(timezone.utc)
     from_24h = (now_utc - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
