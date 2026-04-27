@@ -66,27 +66,53 @@ dark = st.session_state.dark_mode
 # THEME VARIABLES
 # ─────────────────────────────────────────────────────────
 if dark:
-    BG       = "#07080c"
-    S1       = "#0e1018"
-    S2       = "#141720"
-    BORDER   = "#1e2333"
-    TEXT     = "#e6e8f0"
-    MUTED    = "#555e7a"
-    GRID     = "#1a1f2e"
-    PLOT_BG  = "rgba(0,0,0,0)"
-    FONT_COL = "#8892aa"
-    SB_BG    = "#0e1018"
+    BG        = "#07080c"
+    S1        = "#0e1018"
+    S2        = "#141720"
+    S3        = "#1a1f2c"
+    BORDER    = "#1e2333"
+    TEXT      = "#e6e8f0"
+    TEXT2     = "#c4c9db"
+    MUTED     = "#555e7a"
+    GRID      = "#1a1f2e"
+    PLOT_BG   = "rgba(0,0,0,0)"
+    CHART_BG  = "rgba(0,0,0,0)"
+    FONT_COL  = "#8892aa"
+    SB_BG     = "#0e1018"
+    SHADOW    = "none"
+    SHADOW_MD = "none"
+    # Colores de gráficos saturados para fondo oscuro
+    C_BLUE    = "#4f6ef7"
+    C_GREEN   = "#22d47b"
+    C_ORANGE  = "#f5a524"
+    C_RED     = "#f25c5c"
+    C_PURPLE  = "#a78bfa"
+    C_SKY     = "#38bdf8"
+    C_CORAL   = "#fb923c"
 else:
-    BG       = "#f4f6fb"
-    S1       = "#ffffff"
-    S2       = "#eef1f8"
-    BORDER   = "#d0d7e8"
-    TEXT     = "#1a1f35"
-    MUTED    = "#7b87a8"
-    GRID     = "#e4e8f0"
-    PLOT_BG  = "rgba(0,0,0,0)"
-    FONT_COL = "#6b7a9e"
-    SB_BG    = "#ffffff"
+    BG        = "#edf0f9"
+    S1        = "#ffffff"
+    S2        = "#f3f5fc"
+    S3        = "#e8ecf7"
+    BORDER    = "#d4daf0"
+    TEXT      = "#0d1229"
+    TEXT2     = "#2e3657"
+    MUTED     = "#5a6890"
+    GRID      = "#dce2f4"
+    PLOT_BG   = "#ffffff"
+    CHART_BG  = "#ffffff"
+    FONT_COL  = "#4a5578"
+    SB_BG     = "#f8faff"
+    SHADOW    = "0 1px 3px rgba(20,28,80,.07), 0 4px 16px rgba(20,28,80,.07)"
+    SHADOW_MD = "0 2px 8px rgba(20,28,80,.10), 0 8px 24px rgba(20,28,80,.08)"
+    # Colores ligeramente más oscuros/saturados para fondo claro
+    C_BLUE    = "#3d5ce8"
+    C_GREEN   = "#0ea85e"
+    C_ORANGE  = "#d97706"
+    C_RED     = "#dc3545"
+    C_PURPLE  = "#7c5cbf"
+    C_SKY     = "#0891b2"
+    C_CORAL   = "#ea580c"
 
 # ─────────────────────────────────────────────────────────
 # CSS — dynamic theme
@@ -95,87 +121,149 @@ st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Inter:wght@300;400;500&display=swap');
 
-:root {{
-  --bg:{BG};--s1:{S1};--s2:{S2};--border:{BORDER};--text:{TEXT};--muted:{MUTED};
-  --accent:#4f6ef7;--green:#22d47b;--orange:#f5a524;--red:#f25c5c;
-  --purple:#a78bfa;--sky:#38bdf8;
+/* ── Reset & base ── */
+html,body,[class*="css"]{{font-family:'Inter',sans-serif;color:{TEXT};}}
+.stApp{{background:{BG}!important;}}
+
+/* ── Sidebar ── */
+section[data-testid="stSidebar"]{{
+  background:{SB_BG}!important;
+  border-right:1px solid {BORDER}!important;
+  {("box-shadow: 2px 0 16px rgba(20,28,80,.08);" if not dark else "")}
 }}
-html,body,[class*="css"]{{font-family:'Inter',sans-serif;color:var(--text);}}
-.stApp{{background:var(--bg)!important;}}
-section[data-testid="stSidebar"]{{background:{SB_BG}!important;border-right:1px solid var(--border)!important;}}
-section[data-testid="stSidebar"] *{{color:var(--text)!important;}}
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] div{{color:{TEXT}!important;}}
 
 /* ── KPI card ── */
-.kpi{{background:var(--s1);border:1px solid var(--border);border-radius:14px;
-  padding:18px 20px;position:relative;overflow:hidden;}}
-.kpi-accent{{border-top:2px solid #4f6ef7;}} .kpi-green{{border-top:2px solid #22d47b;}}
-.kpi-orange{{border-top:2px solid #f5a524;}} .kpi-red{{border-top:2px solid #f25c5c;}}
-.kpi-purple{{border-top:2px solid #a78bfa;}} .kpi-sky{{border-top:2px solid #38bdf8;}}
-.kpi-coral{{border-top:2px solid #fb923c;}}
-.kpi-label{{font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);}}
+.kpi{{
+  background:{S1};
+  border:1px solid {BORDER};
+  border-radius:14px;
+  padding:18px 20px;
+  position:relative;
+  overflow:hidden;
+  box-shadow:{SHADOW};
+  transition:box-shadow .2s;
+}}
+.kpi:hover{{box-shadow:{SHADOW_MD};}}
+.kpi-accent{{border-top:3px solid {C_BLUE};}}
+.kpi-green{{border-top:3px solid {C_GREEN};}}
+.kpi-orange{{border-top:3px solid {C_ORANGE};}}
+.kpi-red{{border-top:3px solid {C_RED};}}
+.kpi-purple{{border-top:3px solid {C_PURPLE};}}
+.kpi-sky{{border-top:3px solid {C_SKY};}}
+.kpi-coral{{border-top:3px solid {C_CORAL};}}
+.kpi-label{{font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:{MUTED};font-weight:600;}}
 .kpi-value{{font-family:'Syne',sans-serif;font-size:2.1rem;font-weight:800;line-height:1;margin:7px 0 3px;}}
-.kpi-sub{{font-size:.72rem;color:var(--muted);}}
+.kpi-sub{{font-size:.72rem;color:{MUTED};}}
 
 /* ── Agent card ── */
-.ac{{background:var(--s1);border:1px solid var(--border);border-radius:12px;
-  padding:13px 15px;display:flex;align-items:center;gap:12px;}}
+.ac{{
+  background:{S1};
+  border:1px solid {BORDER};
+  border-radius:12px;
+  padding:13px 15px;
+  display:flex;align-items:center;gap:12px;
+  box-shadow:{SHADOW};
+  transition:box-shadow .2s;
+}}
+.ac:hover{{box-shadow:{SHADOW_MD};}}
 .av{{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;
   justify-content:center;font-family:'Syne',sans-serif;font-weight:800;font-size:.95rem;flex-shrink:0;}}
-.an{{font-size:.86rem;font-weight:600;color:var(--text);}}
-.am{{font-size:.7rem;color:var(--muted);margin-top:2px;}}
+.an{{font-size:.86rem;font-weight:600;color:{TEXT};}}
+.am{{font-size:.7rem;color:{MUTED};margin-top:2px;}}
 .ab{{margin-left:auto;padding:3px 9px;border-radius:20px;font-size:.67rem;
   font-weight:700;font-family:'Syne',sans-serif;white-space:nowrap;}}
 .od{{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;vertical-align:middle;}}
 
 /* ── Section header ── */
-.sh{{font-family:'Syne',sans-serif;font-size:.67rem;letter-spacing:.13em;
-  text-transform:uppercase;color:var(--muted);padding-bottom:7px;
-  border-bottom:1px solid var(--border);margin:22px 0 13px;
-  display:flex;align-items:center;justify-content:space-between;}}
+.sh{{
+  font-family:'Syne',sans-serif;font-size:.67rem;letter-spacing:.13em;
+  text-transform:uppercase;color:{MUTED};font-weight:700;
+  padding-bottom:7px;border-bottom:2px solid {BORDER};
+  margin:22px 0 13px;
+  display:flex;align-items:center;justify-content:space-between;
+}}
 
 /* ── Live dot ── */
 @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
 .ld{{display:inline-block;width:8px;height:8px;border-radius:50%;
-  background:#f25c5c;animation:pulse 1.2s infinite;margin-right:6px;vertical-align:middle;}}
+  background:{C_RED};animation:pulse 1.2s infinite;margin-right:6px;vertical-align:middle;}}
 
-/* ── Sidebar controls ── */
-.sidebar-section{{
-  background:var(--s2);border:1px solid var(--border);border-radius:10px;
-  padding:12px 14px;margin-bottom:12px;
+/* ── Sidebar label ── */
+.sidebar-label{{
+  font-size:.67rem;letter-spacing:.1em;text-transform:uppercase;
+  color:{MUTED};margin-bottom:8px;font-family:'Syne',sans-serif;font-weight:700;
 }}
-.sidebar-label{{font-size:.67rem;letter-spacing:.1em;text-transform:uppercase;
-  color:var(--muted);margin-bottom:8px;font-family:'Syne',sans-serif;}}
 
 /* ── Tabs ── */
 .stTabs [data-baseweb="tab-list"]{{
-  background:var(--s1);border-radius:10px;padding:4px;
-  border:1px solid var(--border);gap:3px;
+  background:{S1};
+  border-radius:10px;padding:4px;
+  border:1px solid {BORDER};gap:3px;
   position:sticky;top:0;z-index:10;
+  box-shadow:{SHADOW};
 }}
 .stTabs [data-baseweb="tab"]{{
-  color:var(--muted)!important;font-family:'Syne',sans-serif!important;
+  color:{MUTED}!important;font-family:'Syne',sans-serif!important;
   font-size:.78rem!important;font-weight:600!important;border-radius:7px!important;
-  padding:8px 16px!important;
+  padding:8px 16px!important;transition:background .15s!important;
 }}
-.stTabs [aria-selected="true"]{{background:#4f6ef7!important;color:#fff!important;}}
+.stTabs [data-baseweb="tab"]:hover{{background:{S2}!important;}}
+.stTabs [aria-selected="true"]{{background:{C_BLUE}!important;color:#fff!important;}}
 
-/* ── Streamlit inputs ── */
-.stButton>button{{background:#4f6ef7!important;color:#fff!important;
+/* ── Buttons ── */
+.stButton>button{{
+  background:{C_BLUE}!important;color:#fff!important;
   font-family:'Syne',sans-serif!important;font-weight:700!important;
-  font-size:.8rem!important;border:none!important;border-radius:8px!important;padding:8px 20px!important;}}
-.stButton>button:hover{{opacity:.82!important;}}
-.stSelectbox>div>div,.stNumberInput>div>div>input,.stDateInput>div>div>input,
+  font-size:.8rem!important;border:none!important;border-radius:8px!important;
+  padding:8px 20px!important;box-shadow:{SHADOW}!important;
+}}
+.stButton>button:hover{{opacity:.88!important;box-shadow:{SHADOW_MD}!important;}}
+
+/* ── Form controls ── */
+.stSelectbox>div>div,
+.stNumberInput>div>div>input,
+.stDateInput>div>div>input,
 .stTextInput>div>div>input{{
-  background:var(--s2)!important;border:1px solid var(--border)!important;
-  color:var(--text)!important;border-radius:8px!important;}}
+  background:{S2}!important;border:1.5px solid {BORDER}!important;
+  color:{TEXT}!important;border-radius:8px!important;
+  font-size:.84rem!important;
+}}
+.stSelectbox>div>div:focus-within,
+.stNumberInput>div>div>input:focus,
+.stDateInput>div>div>input:focus{{
+  border-color:{C_BLUE}!important;
+  box-shadow:0 0 0 3px rgba(79,110,247,.15)!important;
+}}
 div[data-testid="stDateInput"] label,
 div[data-testid="stSelectbox"] label,
-div[data-testid="stNumberInput"] label{{color:var(--muted)!important;font-size:.75rem!important;}}
-.stDataFrame{{border-radius:10px;overflow:hidden;}}
-hr{{border-color:var(--border);margin:8px 0;}}
+div[data-testid="stNumberInput"] label{{
+  color:{MUTED}!important;font-size:.74rem!important;font-weight:600!important;
+  letter-spacing:.04em!important;text-transform:uppercase!important;
+}}
 
-/* ── Toggle switch style ── */
-div[data-testid="stToggle"]>label{{font-size:.82rem!important;color:var(--text)!important;}}
+/* ── DataFrame ── */
+.stDataFrame{{border-radius:10px;overflow:hidden;box-shadow:{SHADOW};}}
+.stDataFrame thead th{{
+  background:{S3}!important;color:{TEXT2}!important;
+  font-size:.74rem!important;font-weight:700!important;
+  text-transform:uppercase!important;letter-spacing:.05em!important;
+}}
+.stDataFrame tbody td{{
+  background:{S1}!important;color:{TEXT}!important;font-size:.82rem!important;
+}}
+.stDataFrame tbody tr:hover td{{background:{S2}!important;}}
+
+/* ── Toggle ── */
+div[data-testid="stToggle"]>label{{font-size:.82rem!important;color:{TEXT}!important;font-weight:500!important;}}
+
+/* ── Misc ── */
+hr{{border-color:{BORDER};margin:8px 0;}}
+.stAlert{{border-radius:10px!important;}}
+[data-testid="stMarkdownContainer"] p{{color:{TEXT}!important;}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -192,12 +280,21 @@ except Exception:
 # ─────────────────────────────────────────────────────────
 # PLOTLY BASE
 # ─────────────────────────────────────────────────────────
-_BL = dict(paper_bgcolor=PLOT_BG, plot_bgcolor=PLOT_BG,
-           font=dict(family="Inter", color=FONT_COL, size=12),
-           xaxis=dict(gridcolor=GRID, linecolor=GRID, zerolinecolor=GRID),
-           yaxis=dict(gridcolor=GRID, linecolor=GRID, zerolinecolor=GRID),
-           legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor=GRID),
-           colorway=["#4f6ef7","#22d47b","#f5a524","#f25c5c","#a78bfa","#38bdf8","#fb923c"])
+# Plotly legend/axis bg adapts to theme
+_LEGEND_BG = "rgba(14,16,24,.85)" if dark else "rgba(255,255,255,.9)"
+_LEGEND_BD = GRID
+
+_BL = dict(
+    paper_bgcolor=CHART_BG, plot_bgcolor=CHART_BG,
+    font=dict(family="Inter", color=FONT_COL, size=12),
+    xaxis=dict(gridcolor=GRID, linecolor=GRID, zerolinecolor=GRID,
+               tickfont=dict(color=FONT_COL), title_font=dict(color=MUTED)),
+    yaxis=dict(gridcolor=GRID, linecolor=GRID, zerolinecolor=GRID,
+               tickfont=dict(color=FONT_COL), title_font=dict(color=MUTED)),
+    legend=dict(bgcolor=_LEGEND_BG, bordercolor=_LEGEND_BD,
+                font=dict(color=TEXT, size=11)),
+    colorway=[C_BLUE, C_GREEN, C_ORANGE, C_RED, C_PURPLE, C_SKY, C_CORAL],
+)
 
 def L(**kw):
     r = dict(_BL)
@@ -244,10 +341,10 @@ def fmt_hrs(h):
     return f"{int(h*60)}m"
 
 def sev_color(h):
-    if h >= 48: return "#f25c5c"
-    if h >= 24: return "#f5a524"
-    if h >= 4:  return "#4f6ef7"
-    return "#22d47b"
+    if h >= 48: return C_RED
+    if h >= 24: return C_ORANGE
+    if h >= 4:  return C_BLUE
+    return C_GREEN
 
 def agent_card(ag, chats_n, max_wait_h):
     is_online = ag.get("isOnline", False)
@@ -255,7 +352,7 @@ def agent_card(ag, chats_n, max_wait_h):
     name      = ag.get("name","Agente")
     initials  = "".join(w[0].upper() for w in name.split()[:2])
     av_col    = AV_COLORS[abs(hash(ag.get("id",""))) % len(AV_COLORS)]
-    dot_col   = "#22d47b" if is_online else MUTED
+    dot_col   = C_GREEN if is_online else MUTED
     if is_online:
         bs="background:rgba(34,212,123,.12);color:#22d47b;border:1px solid rgba(34,212,123,.3)";bt="EN LÍNEA"
     elif status=="busy":
@@ -436,12 +533,12 @@ with tab_monitor:
 
     # KPIs
     k1,k2,k3,k4,k5,k6 = st.columns(6)
-    with k1: kpi("Sin asignar",      len(sin_asig),   "sin agentId","red","#f25c5c")
-    with k2: kpi("Soporte N1",       len(soporte_n1), "en cola","orange","#f5a524")
-    with k3: kpi("Comercial",        len(comercial),  "en cola","accent","#4f6ef7")
-    with k4: kpi("Cola _default_",   len(default_q),  "sin cola específica","purple","#a78bfa")
-    with k5: kpi("Pend. responder",  len(pendientes), "bot muted + agente","sky","#38bdf8")
-    with k6: kpi("Agentes online",   len(ag_on),      f"de {len(ag_list)} total","green","#22d47b")
+    with k1: kpi("Sin asignar",      len(sin_asig),   "sin agentId","red",C_RED)
+    with k2: kpi("Soporte N1",       len(soporte_n1), "en cola","orange",C_ORANGE)
+    with k3: kpi("Comercial",        len(comercial),  "en cola","accent",C_BLUE)
+    with k4: kpi("Cola _default_",   len(default_q),  "sin cola específica","purple",C_PURPLE)
+    with k5: kpi("Pend. responder",  len(pendientes), "bot muted + agente","sky",C_SKY)
+    with k6: kpi("Agentes online",   len(ag_on),      f"de {len(ag_list)} total","green",C_GREEN)
 
     st.markdown("")
 
@@ -478,14 +575,13 @@ with tab_monitor:
             qc = Counter(c.get("queueId") or "Sin queue" for c in cht_list)
             f1 = px.pie(pd.DataFrame({"Q":list(qc.keys()),"n":list(qc.values())}),
                         names="Q", values="n", hole=0.58,
-                        color_discrete_map={"_default_":"#4f6ef7","Soporte N1":"#f5a524",
-                                            "Comercial":"#22d47b","Sin queue":MUTED})
+                        color_discrete_map={"_default_":C_BLUE,"Soporte N1":C_ORANGE,"Comercial":C_GREEN,"Sin queue":MUTED})
             f1.update_layout(**L(margin=dict(l=0,r=0,t=10,b=0)))
             pf(f1)
         sh("Bot activo vs silenciado")
         mc = Counter("Silenciado" if c.get("isBotMuted") else "Bot activo" for c in cht_list)
         f2 = go.Figure(go.Bar(x=list(mc.keys()), y=list(mc.values()),
-            marker_color=["#f25c5c" if k=="Silenciado" else "#22d47b" for k in mc.keys()],
+            marker_color=[C_RED if k=="Silenciado" else C_GREEN for k in mc.keys()],
             text=list(mc.values()), textposition="outside"))
         f2.update_layout(**L(showlegend=False, margin=dict(l=10,r=10,t=10,b=20)))
         f2.update_traces(marker_cornerradius=6)
@@ -571,10 +667,10 @@ with tab_tiempos:
         criticos = sum(1 for r in rows if r["hrs"]>=48)
         altos    = sum(1 for r in rows if 24<=r["hrs"]<48)
         k1,k2,k3,k4 = st.columns(4)
-        with k1: kpi("Sin respuesta", len(rows), f"≥{warn_h}h","red","#f25c5c")
-        with k2: kpi("Críticos ≥48h", criticos, "urgente","red","#f25c5c")
-        with k3: kpi("Altos 24–48h",  altos, "","orange","#f5a524")
-        with k4: kpi("Máx. espera",   fmt_hrs(rows[0]["hrs"]), rows[0]["Agente"],"purple","#a78bfa")
+        with k1: kpi("Sin respuesta", len(rows), f"≥{warn_h}h","red",C_RED)
+        with k2: kpi("Críticos ≥48h", criticos, "urgente","red",C_RED)
+        with k3: kpi("Altos 24–48h",  altos, "","orange",C_ORANGE)
+        with k4: kpi("Máx. espera",   fmt_hrs(rows[0]["hrs"]), rows[0]["Agente"],"purple",C_PURPLE)
 
         st.markdown("")
         col_l, col_r = st.columns([2,3])
@@ -585,14 +681,14 @@ with tab_tiempos:
                 mode="gauge+number",
                 value=round(rows[0]["hrs"],1),
                 number={"suffix":" h","font":{"size":40,"color":sev_color(rows[0]["hrs"]),"family":"Syne"}},
-                gauge={"axis":{"range":[0,120],"tickcolor":MUTED},
+                gauge={"axis":{"range":[0,120],"tickcolor":MUTED,"tickfont":{"color":MUTED}},
                        "bar":{"color":sev_color(rows[0]["hrs"])},
-                       "bgcolor":S1,"borderwidth":0,
+                       "bgcolor":S1,"bordercolor":BORDER,"borderwidth":1,
                        "steps":[{"range":[0,4],"color":"rgba(34,212,123,.1)"},
                                  {"range":[4,24],"color":"rgba(79,110,247,.1)"},
                                  {"range":[24,48],"color":"rgba(245,165,36,.1)"},
                                  {"range":[48,120],"color":"rgba(242,92,92,.1)"}],
-                       "threshold":{"line":{"color":"#f25c5c","width":3},"thickness":.8,"value":48}},
+                       "threshold":{"line":{"color":C_RED,"width":3},"thickness":.8,"value":48}},
                 title={"text":f"{rows[0]['Cliente']} · {rows[0]['Agente']}","font":{"size":12,"color":MUTED}},
             ))
             fig_g.update_layout(**L(height=260, margin=dict(l=20,r=20,t=50,b=10)))
@@ -602,8 +698,7 @@ with tab_tiempos:
             sev_c = Counter(r["Severidad"] for r in rows)
             fsev = px.pie(pd.DataFrame({"S":list(sev_c.keys()),"n":list(sev_c.values())}),
                           names="S", values="n", hole=0.55,
-                          color_discrete_map={"🔴 Crítico":"#f25c5c","🟠 Alto":"#f5a524",
-                                              "🟡 Medio":"#4f6ef7","🔵 Bajo":"#22d47b"})
+                          color_discrete_map={"🔴 Crítico":C_RED,"🟠 Alto":C_ORANGE,"🟡 Medio":C_BLUE,"🔵 Bajo":C_GREEN})
             fsev.update_layout(**L(margin=dict(l=0,r=0,t=10,b=0)))
             pf(fsev)
 
@@ -612,7 +707,7 @@ with tab_tiempos:
             df_bars = pd.DataFrame(rows[:20])
             df_bars["Label"] = df_bars["Cliente"] + "  /  " + df_bars["Agente"]
             fb = px.bar(df_bars, x="hrs", y="Label", orientation="h",
-                        color="hrs", color_continuous_scale=["#22d47b","#4f6ef7","#f5a524","#f25c5c"],
+                        color="hrs", color_continuous_scale=[C_GREEN, C_BLUE, C_ORANGE, C_RED],
                         color_continuous_midpoint=24, text=df_bars["⏱ Espera"])
             fb.update_layout(**L(coloraxis_showscale=False,
                                   margin=dict(l=200,r=60,t=10,b=10),
@@ -676,7 +771,7 @@ with tab_turnos:
             sd    = shift_stats[sname]
             total = sd["total"]
             pct   = int(100*sd["asignadas"]/total) if total else 0
-            sc    = SHIFT_COLORS.get(sname,"#4f6ef7")
+            sc    = SHIFT_COLORS.get(sname,C_BLUE)
             with cols[i]:
                 st.markdown(f"""<div class="kpi" style="border-top:2px solid {sc}">
                   <div class="kpi-label" style="color:{sc}">{sname.split()[0]}</div>
@@ -692,9 +787,9 @@ with tab_turnos:
         with col_l:
             sh("Asignadas vs No asignadas por turno")
             f1 = go.Figure()
-            f1.add_trace(go.Bar(name="Asignadas",    x=active_shifts, y=[shift_stats[s]["asignadas"]    for s in active_shifts], marker_color="#22d47b", marker_cornerradius=3))
-            f1.add_trace(go.Bar(name="Respondidas",  x=active_shifts, y=[shift_stats[s]["respondidas"]  for s in active_shifts], marker_color="#4f6ef7", marker_cornerradius=3))
-            f1.add_trace(go.Bar(name="No asignadas", x=active_shifts, y=[shift_stats[s]["no_asignadas"] for s in active_shifts], marker_color="#f25c5c", marker_cornerradius=3))
+            f1.add_trace(go.Bar(name="Asignadas",    x=active_shifts, y=[shift_stats[s]["asignadas"]    for s in active_shifts], marker_color=C_GREEN, marker_cornerradius=3))
+            f1.add_trace(go.Bar(name="Respondidas",  x=active_shifts, y=[shift_stats[s]["respondidas"]  for s in active_shifts], marker_color=C_BLUE, marker_cornerradius=3))
+            f1.add_trace(go.Bar(name="No asignadas", x=active_shifts, y=[shift_stats[s]["no_asignadas"] for s in active_shifts], marker_color=C_RED, marker_cornerradius=3))
             f1.update_layout(**L(barmode="group", margin=dict(l=10,r=10,t=10,b=80)))
             f1.update_xaxes(tickangle=30)
             pf(f1)
@@ -704,7 +799,7 @@ with tab_turnos:
             pct_list = [int(100*shift_stats[s]["asignadas"]/shift_stats[s]["total"]) if shift_stats[s]["total"] else 0 for s in active_shifts]
             f2 = px.bar(pd.DataFrame({"Turno":active_shifts,"Pct":pct_list}),
                         x="Turno", y="Pct", color="Pct",
-                        color_continuous_scale=["#f25c5c","#f5a524","#22d47b"],
+                        color_continuous_scale=[C_RED, C_ORANGE, C_GREEN],
                         text=[f"{p}%" for p in pct_list])
             f2.update_layout(**L(coloraxis_showscale=False, margin=dict(l=10,r=10,t=10,b=80), yaxis_title="%"))
             f2.update_xaxes(tickangle=30)
@@ -717,7 +812,7 @@ with tab_turnos:
             [[daily_shift[d].get(s,0) for d in all_days] for s in active_shifts],
             index=active_shifts, columns=all_days)
         fh = px.imshow(df_heat, aspect="auto",
-                       color_continuous_scale=[S1,"#1a2a4a","#4f6ef7","#22d47b"],
+                       color_continuous_scale=[S2, S3, C_BLUE, C_GREEN],
                        text_auto=True)
         fh.update_layout(**L(margin=dict(l=140,r=10,t=10,b=60)))
         fh.update_xaxes(tickangle=30)
@@ -780,10 +875,10 @@ with tab_prod:
         st.info("Sin datos de productividad para el período seleccionado.")
     else:
         k1,k2,k3,k4 = st.columns(4)
-        with k1: kpi("Asignaciones", sum(r["Asignaciones"] for r in prod_rows), f"{d_from}–{d_to}","accent","#4f6ef7")
-        with k2: kpi("Acciones",     sum(r["Acciones"]     for r in prod_rows), "agent-action","green","#22d47b")
-        with k3: kpi("Cierres",      sum(r["Cierres"]      for r in prod_rows), "conversation-close","orange","#f5a524")
-        with k4: kpi("Top agente",   prod_rows[0]["Nombre"], f"{prod_rows[0]['Asignaciones']} asig.","purple","#a78bfa")
+        with k1: kpi("Asignaciones", sum(r["Asignaciones"] for r in prod_rows), f"{d_from}–{d_to}","accent",C_BLUE)
+        with k2: kpi("Acciones",     sum(r["Acciones"]     for r in prod_rows), "agent-action","green",C_GREEN)
+        with k3: kpi("Cierres",      sum(r["Cierres"]      for r in prod_rows), "conversation-close","orange",C_ORANGE)
+        with k4: kpi("Top agente",   prod_rows[0]["Nombre"], f"{prod_rows[0]['Asignaciones']} asig.","purple",C_PURPLE)
 
         st.markdown("")
         col_l, col_r = st.columns(2)
@@ -792,16 +887,16 @@ with tab_prod:
             f1 = px.bar(x=[r["Asignaciones"] for r in prod_rows],
                         y=[r["Nombre"]       for r in prod_rows], orientation="h",
                         color=[r["Asignaciones"] for r in prod_rows],
-                        color_continuous_scale=[S2,"#4f6ef7"])
+                        color_continuous_scale=[S2, C_BLUE])
             f1.update_layout(**L(coloraxis_showscale=False, margin=dict(l=150,r=10,t=10,b=10)))
             f1.update_traces(marker_cornerradius=4); pf(f1)
 
             sh("Acciones vs Cierres")
             f2 = go.Figure()
             f2.add_trace(go.Bar(name="Acciones", x=[r["Nombre"] for r in prod_rows],
-                                y=[r["Acciones"] for r in prod_rows], marker_color="#4f6ef7", marker_cornerradius=4))
+                                y=[r["Acciones"] for r in prod_rows], marker_color=C_BLUE, marker_cornerradius=4))
             f2.add_trace(go.Bar(name="Cierres",  x=[r["Nombre"] for r in prod_rows],
-                                y=[r["Cierres"]  for r in prod_rows], marker_color="#22d47b", marker_cornerradius=4))
+                                y=[r["Cierres"]  for r in prod_rows], marker_color=C_GREEN, marker_cornerradius=4))
             f2.update_layout(**L(barmode="group")); pf(f2)
 
         with col_r:
@@ -809,7 +904,7 @@ with tab_prod:
             f3 = px.bar(x=[r["Eficiencia %"] for r in prod_rows],
                         y=[r["Nombre"]        for r in prod_rows], orientation="h",
                         color=[r["Eficiencia %"] for r in prod_rows],
-                        color_continuous_scale=["#f25c5c","#f5a524","#22d47b"])
+                        color_continuous_scale=[C_RED, C_ORANGE, C_GREEN])
             f3.update_layout(**L(coloraxis_showscale=False, margin=dict(l=150,r=10,t=10,b=10)))
             f3.update_traces(marker_cornerradius=4); pf(f3)
 
@@ -841,10 +936,10 @@ with tab_ses:
         ses = its(d_ses)
         all_ev = [e["name"] for s in ses for e in s.get("events",[])]
         k1,k2,k3,k4 = st.columns(4)
-        with k1: kpi("Sesiones", len(ses), f"{d_from}–{d_to}","accent","#4f6ef7")
-        with k2: kpi("Orgánicas", sum(1 for s in ses if s.get("startingCause")=="Organic"),"","green","#22d47b")
-        with k3: kpi("Vía Template WA", sum(1 for s in ses if s.get("startingCause")=="WhatsAppTemplate"),"","orange","#f5a524")
-        with k4: kpi("Eventos totales", len(all_ev),"","purple","#a78bfa")
+        with k1: kpi("Sesiones", len(ses), f"{d_from}–{d_to}","accent",C_BLUE)
+        with k2: kpi("Orgánicas", sum(1 for s in ses if s.get("startingCause")=="Organic"),"","green",C_GREEN)
+        with k3: kpi("Vía Template WA", sum(1 for s in ses if s.get("startingCause")=="WhatsAppTemplate"),"","orange",C_ORANGE)
+        with k4: kpi("Eventos totales", len(all_ev),"","purple",C_PURPLE)
         st.markdown("")
         col_l, col_r = st.columns(2)
         with col_l:
@@ -858,7 +953,7 @@ with tab_ses:
         with col_r:
             ev_df = pd.Series(all_ev).value_counts().reset_index(); ev_df.columns=["Evento","n"]
             f2 = px.bar(ev_df, x="n", y="Evento", orientation="h",
-                        color="n", color_continuous_scale=[S2,"#a78bfa"])
+                        color="n", color_continuous_scale=[S2, C_PURPLE])
             f2.update_layout(**L(coloraxis_showscale=False, margin=dict(l=170,r=10,t=10,b=10)))
             f2.update_traces(marker_cornerradius=3); pf(f2)
         sh("Detalle")
@@ -884,7 +979,7 @@ with tab_extra:
             sc_ch, d_ch = api_get("channels")
             if sc_ch == 200:
                 chs = its(d_ch)
-                kpi("Canales", len(chs), f"{sum(1 for c in chs if c.get('active'))} activos","sky","#38bdf8")
+                kpi("Canales", len(chs), f"{sum(1 for c in chs if c.get('active'))} activos","sky",C_SKY)
                 st.markdown("")
                 plat = pd.Series([c.get("platform","") for c in chs]).value_counts().reset_index(); plat.columns=["P","n"]
                 f = px.bar(plat, x="P", y="n", color="P"); f.update_layout(**L()); f.update_traces(marker_cornerradius=5); pf(f)
@@ -896,7 +991,7 @@ with tab_extra:
             sc_t, d_t = api_get("whatsapp/templates")
             if sc_t == 200:
                 tpls = its(d_t)
-                kpi("Templates", len(tpls), f"MARKETING: {sum(1 for t in tpls if t.get('category')=='MARKETING')}","accent","#4f6ef7")
+                kpi("Templates", len(tpls), f"MARKETING: {sum(1 for t in tpls if t.get('category')=='MARKETING')}","accent",C_BLUE)
                 st.markdown("")
                 cf = pd.Series([t.get("category","") for t in tpls]).value_counts().reset_index(); cf.columns=["Cat","n"]
                 ft = px.pie(cf, names="Cat", values="n", hole=0.55,
