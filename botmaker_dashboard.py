@@ -97,15 +97,21 @@ except Exception:
 # ─────────────────────────────────────────────────────────
 # PLOTLY THEME
 # ─────────────────────────────────────────────────────────
-LAYOUT = dict(
+_LAYOUT_BASE = dict(
     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     font=dict(family="Inter", color="#8892aa", size=12),
-    margin=dict(l=10, r=10, t=36, b=10),
     xaxis=dict(gridcolor="#1a1f2e", linecolor="#1a1f2e", zerolinecolor="#1a1f2e"),
     yaxis=dict(gridcolor="#1a1f2e", linecolor="#1a1f2e", zerolinecolor="#1a1f2e"),
     legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor="#1a1f2e"),
     colorway=["#4f6ef7","#22d47b","#f5a524","#f25c5c","#a78bfa","#38bdf8"],
 )
+def mk_layout(**overrides):
+    """Base layout mergeado con overrides. Evita duplicate keyword error."""
+    result = dict(_LAYOUT_BASE)
+    if "margin" not in overrides:
+        result["margin"] = dict(l=10, r=10, t=36, b=10)
+    result.update(overrides)
+    return result
 def pf(f): st.plotly_chart(f, use_container_width=True, config={"displayModeBar": False})
 
 # ─────────────────────────────────────────────────────────
@@ -324,7 +330,7 @@ if page == "🔴  Monitor en vivo":
             f1 = px.pie(q_df, names="Queue", values="n", hole=0.58,
                         color_discrete_map={"_default_":"#4f6ef7","Soporte N1":"#f5a524",
                                             "Comercial":"#22d47b","Sin queue":"#555e7a"})
-            f1.update_layout(**LAYOUT, margin=dict(l=0,r=0,t=10,b=0))
+            f1.update_layout(**mk_layout(margin=dict(l=0,r=0,t=10,b=0)))
             pf(f1)
 
         sh("Bot activo vs silenciado")
@@ -335,7 +341,7 @@ if page == "🔴  Monitor en vivo":
                 marker_color=["#f25c5c" if k=="Silenciado" else "#22d47b" for k in m_counts.keys()],
                 text=list(m_counts.values()), textposition="outside",
             ))
-            f2.update_layout(**LAYOUT, showlegend=False, margin=dict(l=10,r=10,t=10,b=30))
+            f2.update_layout(**mk_layout(showlegend=False, margin=dict(l=10,r=10,t=10,b=30)))
             f2.update_traces(marker_cornerradius=6)
             pf(f2)
 
@@ -367,7 +373,7 @@ if page == "🔴  Monitor en vivo":
                 color_continuous_scale=["#1a1f2e","#38bdf8"],
                 title="Pendientes por agente",
             )
-            f3.update_layout(**LAYOUT, coloraxis_showscale=False, margin=dict(l=130,r=10,t=36,b=10))
+            f3.update_layout(**mk_layout(coloraxis_showscale=False, margin=dict(l=130,r=10,t=36,b=10)))
             f3.update_traces(marker_cornerradius=4)
             pf(f3)
     else:
@@ -475,7 +481,7 @@ elif page == "📈  Productividad agentes":
                     color=[r["Asignaciones"] for r in prod_rows],
                     color_continuous_scale=["#1a1f2e","#4f6ef7"],
                 )
-                f1.update_layout(**LAYOUT, coloraxis_showscale=False, margin=dict(l=150,r=10,t=10,b=10))
+                f1.update_layout(**mk_layout(coloraxis_showscale=False, margin=dict(l=150,r=10,t=10,b=10)))
                 f1.update_traces(marker_cornerradius=4)
                 pf(f1)
 
@@ -487,7 +493,7 @@ elif page == "📈  Productividad agentes":
                 f2.add_trace(go.Bar(name="Cierres",  x=[r["Nombre"] for r in prod_rows],
                                     y=[r["Cierres conv."] for r in prod_rows],
                                     marker_color="#22d47b", marker_cornerradius=4))
-                f2.update_layout(**LAYOUT, barmode="group")
+                f2.update_layout(**mk_layout(barmode="group"))
                 pf(f2)
 
             with col_r:
@@ -499,7 +505,7 @@ elif page == "📈  Productividad agentes":
                     color=[r["Eficiencia %"] for r in prod_rows],
                     color_continuous_scale=["#f25c5c","#f5a524","#22d47b"],
                 )
-                f3.update_layout(**LAYOUT, coloraxis_showscale=False, margin=dict(l=150,r=10,t=10,b=10))
+                f3.update_layout(**mk_layout(coloraxis_showscale=False, margin=dict(l=150,r=10,t=10,b=10)))
                 f3.update_traces(marker_cornerradius=4)
                 pf(f3)
 
@@ -509,7 +515,7 @@ elif page == "📈  Productividad agentes":
                     values=[r["Asignaciones"] for r in prod_rows],
                     hole=0.55,
                 )
-                f4.update_layout(**LAYOUT, margin=dict(l=0,r=0,t=10,b=0))
+                f4.update_layout(**mk_layout(margin=dict(l=0,r=0,t=10,b=0)))
                 pf(f4)
 
             sh("Tabla de productividad por agente")
@@ -522,7 +528,7 @@ elif page == "📈  Productividad agentes":
                 df_tl = pd.DataFrame(timeline_rows)
                 pivot = df_tl.groupby(["fecha","agente"]).size().reset_index(name="n")
                 f5 = px.bar(pivot, x="fecha", y="n", color="agente", barmode="stack")
-                f5.update_layout(**LAYOUT)
+                f5.update_layout(**mk_layout())
                 f5.update_traces(marker_cornerradius=3)
                 pf(f5)
 
@@ -570,7 +576,7 @@ elif page == "🗂  Sesiones":
                 by_day.columns = ["Fecha","Origen","n"]
                 f1 = px.bar(by_day, x="Fecha", y="n", color="Origen", barmode="stack",
                             color_discrete_map={"Organic":"#4f6ef7","WhatsAppTemplate":"#f5a524"})
-                f1.update_layout(**LAYOUT); f1.update_traces(marker_cornerradius=3)
+                f1.update_layout(**mk_layout()); f1.update_traces(marker_cornerradius=3)
                 pf(f1)
 
             with col_r:
@@ -579,8 +585,8 @@ elif page == "🗂  Sesiones":
                 ev_df.columns = ["Evento","n"]
                 f2 = px.bar(ev_df, x="n", y="Evento", orientation="h",
                             color="n", color_continuous_scale=["#1a1f2e","#a78bfa"])
-                f2.update_layout(**LAYOUT, coloraxis_showscale=False,
-                                 margin=dict(l=170,r=10,t=10,b=10))
+                f2.update_layout(**mk_layout(coloraxis_showscale=False,
+                                 margin=dict(l=170,r=10,t=10,b=10)))
                 f2.update_traces(marker_cornerradius=3)
                 pf(f2)
 
@@ -619,7 +625,7 @@ elif page == "🎯  Intents & Canales":
                 top_df.columns = ["Topic","n"]
                 f1 = px.bar(top_df, x="n", y="Topic", orientation="h",
                             color="n", color_continuous_scale=["#1a1f2e","#a78bfa"])
-                f1.update_layout(**LAYOUT, coloraxis_showscale=False, margin=dict(l=160,r=10,t=10,b=10))
+                f1.update_layout(**mk_layout(coloraxis_showscale=False, margin=dict(l=160,r=10,t=10,b=10)))
                 f1.update_traces(marker_cornerradius=3)
                 pf(f1)
         with col_r:
@@ -632,7 +638,7 @@ elif page == "🎯  Intents & Canales":
                 plat.columns = ["Plataforma","n"]
                 f2 = px.bar(plat, x="Plataforma", y="n", color="Plataforma",
                             color_discrete_sequence=["#4f6ef7","#22d47b","#f5a524","#f25c5c","#a78bfa","#38bdf8","#fb923c"])
-                f2.update_layout(**LAYOUT); f2.update_traces(marker_cornerradius=5)
+                f2.update_layout(**mk_layout()); f2.update_traces(marker_cornerradius=5)
                 pf(f2)
                 rows = [{"ID":c["id"],"Plataforma":c["platform"],"Activo":"✅" if c.get("active") else "❌","Número":c.get("number","")} for c in chs]
                 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -660,7 +666,7 @@ elif page == "📋  Templates WA":
                 cat_df.columns = ["Categoría","n"]
                 f = px.pie(cat_df, names="Categoría", values="n", hole=0.55,
                            color_discrete_map={"MARKETING":"#f5a524","UTILITY":"#4f6ef7"})
-                f.update_layout(**LAYOUT)
+                f.update_layout(**mk_layout())
                 pf(f)
             with col_r:
                 rows = [{"Nombre":t.get("name",""),"Estado":t.get("state",""),
