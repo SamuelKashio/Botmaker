@@ -154,11 +154,10 @@ with col_run:
 st.markdown("---")
 
 if run_btn and token:
-    results = {}      # endpoint_key -> {status, data, elapsed_ms, url, params}
+    results   = {}      # endpoint_key -> {status, data, elapsed_ms, url, params}
     log_lines = []
-    ok_count = 0
-    err_count = 0
-    skip_count = 0
+    # Usamos un dict mutable para los contadores (evita el problema con nonlocal en bloques if)
+    counts = {"ok": 0, "err": 0, "skip": 0}
 
     log_container = st.empty()
     progress_bar  = st.progress(0)
@@ -167,7 +166,7 @@ if run_btn and token:
     def log(msg, kind="info"):
         log_lines.append((msg, kind))
         html = ""
-        for m, k in log_lines[-40:]:   # últimas 40 líneas
+        for m, k in log_lines[-40:]:
             html += f'<div class="log-entry log-{k}">{m}</div>'
         log_container.markdown(
             f'<div style="max-height:380px;overflow-y:auto;background:#0d1017;'
@@ -176,7 +175,6 @@ if run_btn and token:
         )
 
     def record(key, label, status, data, elapsed, url, params=None):
-        nonlocal ok_count, err_count
         results[key] = {
             "label": label,
             "url": url,
@@ -187,14 +185,14 @@ if run_btn and token:
             "extracted_at": datetime.utcnow().isoformat() + "Z",
         }
         if status == 200:
-            ok_count += 1
+            counts["ok"] += 1
             n = len(safe_items(data)) if isinstance(data, (dict, list)) else "—"
             log(f"✅ {status} {label} [{elapsed}ms] — {n} items", "ok")
         elif status == -1:
-            err_count += 1
+            counts["err"] += 1
             log(f"❌ ERR {label} — {str(data)[:60]}", "err")
         else:
-            err_count += 1
+            counts["err"] += 1
             log(f"⚠️ {status} {label} [{elapsed}ms]", "err")
 
     # ── Fase 1: Endpoints directos (sin IDs dinámicos) ──────────────────────
@@ -256,7 +254,7 @@ if run_btn and token:
                f"{BASE_URL}/chats/{chat_id}")
     else:
         log("⏭ Chat detail — sin chat_id disponible", "skip")
-        skip_count += 1
+        counts["skip"] += 1
     done += 1; progress_bar.progress(min(done/total_steps, 1.0))
 
     # -- Agent detail (PATCH no lo llamamos, solo usamos la lista) --
@@ -270,7 +268,7 @@ if run_btn and token:
                f"{BASE_URL}/roles/{role_id}")
     else:
         log("⏭ Role detail — sin role_id", "skip")
-        skip_count += 1
+        counts["skip"] += 1
     done += 1; progress_bar.progress(min(done/total_steps, 1.0))
 
     # -- Intent detail --
@@ -281,7 +279,7 @@ if run_btn and token:
                f"{BASE_URL}/intents/{intent_id}")
     else:
         log("⏭ Intent detail — sin intent_id", "skip")
-        skip_count += 1
+        counts["skip"] += 1
     done += 1; progress_bar.progress(min(done/total_steps, 1.0))
 
     # -- Webhook detail --
@@ -292,7 +290,7 @@ if run_btn and token:
                f"{BASE_URL}/webhooks/{wh_id}")
     else:
         log("⏭ Webhook detail — sin webhook_id", "skip")
-        skip_count += 1
+        counts["skip"] += 1
     done += 1; progress_bar.progress(min(done/total_steps, 1.0))
 
     # -- WA Template detail --
@@ -303,7 +301,7 @@ if run_btn and token:
                f"{BASE_URL}/whatsapp/templates/{tpl_name}")
     else:
         log("⏭ WA Template detail — sin nombre", "skip")
-        skip_count += 1
+        counts["skip"] += 1
     done += 1; progress_bar.progress(min(done/total_steps, 1.0))
 
     # -- WA Account detail + health --
@@ -317,7 +315,7 @@ if run_btn and token:
                f"{BASE_URL}/whatsapp/accounts/{wa_phone}/health")
     else:
         log("⏭ WA Account detail/health — sin phone", "skip")
-        skip_count += 2
+        counts["skip"] += 2
     done += 2; progress_bar.progress(min(done/total_steps, 1.0))
 
     # -- Commerce: catalog detail, categories, products --
@@ -335,7 +333,7 @@ if run_btn and token:
             time.sleep(0.1)
     else:
         log("⏭ Catalog detail/categories/products — sin catalog_id", "skip")
-        skip_count += 2
+        counts["skip"] += 2
         done += 2
 
     # -- Messages: paginación (siguiente página si existe) --
@@ -358,9 +356,9 @@ if run_btn and token:
     c1, c2, c3, c4 = st.columns(4)
     for col, num, label, color in [
         (c1, len(results), "Endpoints llamados", "#10b981"),
-        (c2, ok_count,     "Respuestas OK",      "#10b981"),
-        (c3, err_count,    "Errores",            "#ef4444"),
-        (c4, skip_count,   "Salteados (sin ID)", "#6b7280"),
+        (c2, counts["ok"],   "Respuestas OK",      "#10b981"),
+        (c3, counts["err"],  "Errores",            "#ef4444"),
+        (c4, counts["skip"], "Salteados (sin ID)", "#6b7280"),
     ]:
         with col:
             st.markdown(f"""
@@ -420,9 +418,9 @@ if run_btn and token:
             "extracted_at": datetime.utcnow().isoformat() + "Z",
             "base_url": BASE_URL,
             "total_endpoints": len(results),
-            "ok": ok_count,
-            "errors": err_count,
-            "skipped": skip_count,
+            "ok": counts["ok"],
+            "errors": counts["err"],
+            "skipped": counts["skip"],
         },
         "endpoints": results,
         "schema_summary": {
