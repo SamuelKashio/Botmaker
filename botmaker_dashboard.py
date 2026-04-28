@@ -315,6 +315,23 @@ def fmt_mins(m: float) -> str:
     if m < 1440: return f"{m/60:.1f}h"
     return f"{m/1440:.1f}d"
 
+BOTMAKER_BASE = "https://go.botmaker.com/#/chats/"
+
+def chat_url(chat_id: str) -> str:
+    """Construye la URL directa al chat en Botmaker."""
+    if not chat_id: return ""
+    return f"{BOTMAKER_BASE}{chat_id}"
+
+def get_chat_id(obj: dict) -> str:
+    """Extrae chatId de un objeto chat o sesión."""
+    # Objeto chat: chat.chatId
+    cid = obj.get("chat", {}).get("chatId", "")
+    if cid: return cid
+    # Objeto sesión: chat.chat.chatId
+    cid = obj.get("chat", {}).get("chat", {}).get("chatId", "")
+    if cid: return cid
+    return ""
+
 def sev_cls(m: float, ok: float, warn: float) -> str:
     if m <= ok:   return "sla-ok"
     if m <= warn: return "sla-warn"
@@ -371,8 +388,13 @@ def compute_session_kpis(sessions: list) -> pd.DataFrame:
         assign_delay = (t_assign - t0).total_seconds()/60 if (t_assign and t0) else None
         aht_min      = (t_close - t_assign).total_seconds()/60 if (t_close and t_assign) else None
 
+        chat_id = get_chat_id(s)
         rows.append({
             "session_id":    s.get("id",""),
+            "chat_id":       chat_id,
+            "chat_url":      chat_url(chat_id),
+            "contact":       s.get("chat",{}).get("chat",{}).get("contactId",""),
+            "client_name":   s.get("chat",{}).get("firstName",""),
             "date":          (t0 + LIMA_OFFSET).date(),
             "hour":          (t0 + LIMA_OFFSET).hour,
             "start_time":    t0,
@@ -840,8 +862,7 @@ with tab_rt:
         if live["pending"]:
             rows = []
             for c in live["pending"]:
-                sc_ = c["sev_cls"]
-                sla_badge = (f'<span class="{sc_}">{c["wait_fmt"]}</span>')
+                cid = get_chat_id(c)
                 rows.append({
                     "⏱ Espera":    c["wait_fmt"],
                     "Sev":         "🔴" if c["wait_min"]>sla_wait_warn else ("🟠" if c["wait_min"]>SLA_WAIT_OK else "🟢"),
@@ -850,21 +871,38 @@ with tab_rt:
                     "País":        c.get("country","—"),
                     "Queue":       c.get("queueId","—"),
                     "Último msg":  c.get("lastUserMessageDatetime","")[:16].replace("T"," "),
+                    "🔗 Chat":     chat_url(cid),
                 })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
-                         height=min(38*len(rows)+38, 380))
+            st.dataframe(
+                pd.DataFrame(rows),
+                use_container_width=True, hide_index=True,
+                height=min(38*len(rows)+38, 380),
+                column_config={"🔗 Chat": st.column_config.LinkColumn(
+                    "🔗 Chat", display_text="Ver chat")},
+            )
         else:
             st.success("✅ Sin chats pendientes de respuesta.")
 
         sh(f"Sin asignar — {n_unassigned}", "chats sin agentId · últimas 24h")
         if live["unassigned"]:
-            rows = [{"Nombre":c.get("firstName","—"),"País":c.get("country","—"),
-                     "Queue":c.get("queueId","—"),
-                     "🪟 WA":"✅" if c.get("whatsAppWindowCloseDatetime","")>now_utc.isoformat()[:19] else "❌",
-                     "Último msg":c.get("lastUserMessageDatetime","")[:16].replace("T"," ")}
-                    for c in live["unassigned"]]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
-                         height=min(38*len(rows)+38, 300))
+            rows = []
+            for c in live["unassigned"]:
+                cid = get_chat_id(c)
+                rows.append({
+                    "Nombre":     c.get("firstName","—"),
+                    "País":       c.get("country","—"),
+                    "Queue":      c.get("queueId","—"),
+                    "🪟 WA":      "✅" if c.get("whatsAppWindowCloseDatetime","")>now_utc.isoformat()[:19] else "❌",
+                    "Último msg": c.get("lastUserMessageDatetime","")[:16].replace("T"," "),
+                    "🔗 Chat":    chat_url(cid),
+                })
+            st.dataframe(
+                pd.DataFrame(rows),
+                use_container_width=True, hide_index=True,
+                height=min(38*len(rows)+38, 300),
+                column_config={"🔗 Chat": st.column_config.LinkColumn(
+                    "🔗 Chat", display_text="Ver chat")},
+            )
         else:
             st.success("✅ Sin chats sin asignar.")
 
@@ -1001,16 +1039,29 @@ with tab_sla:
 
         # ── Tabla detallada de sesiones ───────────────────
         sh("Sesiones con detalle de tiempos")
-        df_show = df_kpis[["date","shift","agent","cause","frt_min","assign_delay",
-                             "aht_min","assigned","resolved","transferred"]].copy()
-        df_show["frt_min"]      = df_show["frt_min"].apply(lambda x: fmt_mins(x) if pd.notna(x) else "—")
-        df_show["assign_delay"] = df_show["assign_delay"].apply(lambda x: fmt_mins(x) if pd.notna(x) else "—")
-        df_show["aht_min"]      = df_show["aht_min"].apply(lambda x: fmt_mins(x) if pd.notna(x) else "—")
-        df_show["assigned"]     = df_show["assigned"].map({True:"✅",False:"❌"})
-        df_show["resolved"]     = df_show["resolved"].map({True:"✅",False:"❌"})
-        df_show["transferred"]  = df_show["transferred"].map({True:"↔️",False:""})
-        df_show.columns = ["Fecha","Turno","Agente","Origen","FRT","Delay asign.","AHT","Asignado","Resuelto","Transferido"]
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
+        cols_ses = ["date","shift","client_name","agent","cause",
+                    "frt_min","assign_delay","aht_min",
+                    "assigned","resolved","transferred","chat_url"]
+        # solo columnas que existen en el df
+        cols_ses = [c for c in cols_ses if c in df_kpis.columns]
+        df_show = df_kpis[cols_ses].copy()
+        if "frt_min"      in df_show: df_show["frt_min"]      = df_show["frt_min"].apply(lambda x: fmt_mins(x) if pd.notna(x) else "—")
+        if "assign_delay" in df_show: df_show["assign_delay"] = df_show["assign_delay"].apply(lambda x: fmt_mins(x) if pd.notna(x) else "—")
+        if "aht_min"      in df_show: df_show["aht_min"]      = df_show["aht_min"].apply(lambda x: fmt_mins(x) if pd.notna(x) else "—")
+        if "assigned"     in df_show: df_show["assigned"]     = df_show["assigned"].map({True:"✅",False:"❌"})
+        if "resolved"     in df_show: df_show["resolved"]     = df_show["resolved"].map({True:"✅",False:"❌"})
+        if "transferred"  in df_show: df_show["transferred"]  = df_show["transferred"].map({True:"↔️",False:""})
+        rename_map = {"date":"Fecha","shift":"Turno","client_name":"Cliente",
+                      "agent":"Agente","cause":"Origen","frt_min":"FRT",
+                      "assign_delay":"Delay asign.","aht_min":"AHT",
+                      "assigned":"Asignado","resolved":"Resuelto",
+                      "transferred":"Transferido","chat_url":"🔗 Chat"}
+        df_show = df_show.rename(columns={k:v for k,v in rename_map.items() if k in df_show.columns})
+        col_cfg = {}
+        if "🔗 Chat" in df_show.columns:
+            col_cfg["🔗 Chat"] = st.column_config.LinkColumn("🔗 Chat", display_text="Ver chat")
+        st.dataframe(df_show, use_container_width=True, hide_index=True,
+                     column_config=col_cfg if col_cfg else None)
 
 
 # ══════════════════════════════════════════════════════════
