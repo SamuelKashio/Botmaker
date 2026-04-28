@@ -236,6 +236,28 @@ hr{{border-color:{BORDER};margin:6px 0;}}
 @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
 .ld{{display:inline-block;width:8px;height:8px;border-radius:50%;
   background:{C_RED};animation:pulse 1.2s infinite;margin-right:5px;vertical-align:middle;}}
+
+/* ── Download button — diferenciado del botón primario ── */
+div[data-testid="stDownloadButton"] > button{{
+  background:{S2}!important;
+  color:{TEXT}!important;
+  border:1.5px solid {BORDER}!important;
+  font-family:'Syne',sans-serif!important;
+  font-weight:700!important;
+  font-size:.75rem!important;
+  border-radius:8px!important;
+  padding:7px 10px!important;
+  box-shadow:{SHADOW}!important;
+  width:100%!important;
+  white-space:nowrap!important;
+  transition:all .2s!important;
+}}
+div[data-testid="stDownloadButton"] > button:hover{{
+  background:{S3}!important;
+  border-color:{C_BLUE}!important;
+  color:{C_BLUE}!important;
+  box-shadow:{SHADOW_MD}!important;
+}}
 </style>""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────
@@ -271,6 +293,38 @@ def pf(f, height=None):
     kw = {"use_container_width": True, "config": {"displayModeBar": False}}
     if height: kw["height"] = height
     st.plotly_chart(f, **kw)
+
+def show_table(df: pd.DataFrame, filename: str, height=None,
+               col_cfg: dict = None, key: str = None):
+    """
+    Muestra un dataframe con botón de descarga CSV integrado.
+    Para columnas LinkColumn, el CSV incluye la URL completa (útil para copiar).
+    """
+    # CSV: convertir columnas con URLs a texto plano
+    df_csv = df.copy()
+    if col_cfg:
+        for col in col_cfg:
+            if col in df_csv.columns:
+                # Mantener la URL cruda en el CSV
+                pass
+    csv_bytes = df_csv.to_csv(index=False).encode("utf-8")
+
+    # Layout: tabla + botón alineado arriba a la derecha
+    hdr_l, hdr_r = st.columns([0.88, 0.12])
+    with hdr_r:
+        st.download_button(
+            label="⬇️ CSV",
+            data=csv_bytes,
+            file_name=filename,
+            mime="text/csv",
+            use_container_width=True,
+            key=key or f"dl_{filename}_{id(df)}",
+        )
+    with hdr_l:
+        kw = {"use_container_width": True, "hide_index": True}
+        if height:    kw["height"]        = height
+        if col_cfg:   kw["column_config"] = col_cfg
+        st.dataframe(df, **kw)
 
 # ─────────────────────────────────────────────────────────
 # API
@@ -873,12 +927,12 @@ with tab_rt:
                     "Último msg":  c.get("lastUserMessageDatetime","")[:16].replace("T"," "),
                     "🔗 Chat":     chat_url(cid),
                 })
-            st.dataframe(
+            show_table(
                 pd.DataFrame(rows),
-                use_container_width=True, hide_index=True,
+                filename="pendientes_respuesta.csv",
                 height=min(38*len(rows)+38, 380),
-                column_config={"🔗 Chat": st.column_config.LinkColumn(
-                    "🔗 Chat", display_text="Ver chat")},
+                col_cfg={"🔗 Chat": st.column_config.LinkColumn("🔗 Chat", display_text="Ver chat")},
+                key="dl_pendientes",
             )
         else:
             st.success("✅ Sin chats pendientes de respuesta.")
@@ -896,12 +950,12 @@ with tab_rt:
                     "Último msg": c.get("lastUserMessageDatetime","")[:16].replace("T"," "),
                     "🔗 Chat":    chat_url(cid),
                 })
-            st.dataframe(
+            show_table(
                 pd.DataFrame(rows),
-                use_container_width=True, hide_index=True,
+                filename="sin_asignar.csv",
                 height=min(38*len(rows)+38, 300),
-                column_config={"🔗 Chat": st.column_config.LinkColumn(
-                    "🔗 Chat", display_text="Ver chat")},
+                col_cfg={"🔗 Chat": st.column_config.LinkColumn("🔗 Chat", display_text="Ver chat")},
+                key="dl_sin_asignar",
             )
         else:
             st.success("✅ Sin chats sin asignar.")
@@ -1060,8 +1114,8 @@ with tab_sla:
         col_cfg = {}
         if "🔗 Chat" in df_show.columns:
             col_cfg["🔗 Chat"] = st.column_config.LinkColumn("🔗 Chat", display_text="Ver chat")
-        st.dataframe(df_show, use_container_width=True, hide_index=True,
-                     column_config=col_cfg if col_cfg else None)
+        show_table(df_show, filename="sesiones_tiempos.csv",
+                   col_cfg=col_cfg if col_cfg else None, key="dl_sesiones_sla")
 
 
 # ══════════════════════════════════════════════════════════
@@ -1151,18 +1205,18 @@ with tab_team:
         df_disp["FRT prom (min)"] = df_disp["FRT prom (min)"].apply(lambda x: fmt_mins(x) if pd.notna(x) else "—")
         df_disp["AHT prom (min)"] = df_disp["AHT prom (min)"].apply(lambda x: fmt_mins(x) if pd.notna(x) else "—")
         df_disp["SLA FRT %"]      = df_disp["SLA FRT %"].apply(lambda x: f"{x}%" if pd.notna(x) else "—")
-        st.dataframe(df_disp, use_container_width=True, hide_index=True)
+        show_table(df_disp, filename="productividad_agentes.csv", key="dl_prod")
 
 # ══════════════════════════════════════════════════════════
 # TAB 4 — TURNOS
 # ══════════════════════════════════════════════════════════
 with tab_shifts:
     sh("Horarios configurados")
-    st.dataframe(pd.DataFrame([{"Agente":s[0],"Días":s[1] if isinstance(s[1],str) else
+    show_table(pd.DataFrame([{"Agente":s[0],"Días":s[1] if isinstance(s[1],str) else
                                  "Lun–Vie" if s[1]==[0,1,2,3,4] else "Sáb–Dom",
                                  "Horario (Lima)":f"{s[2]:02d}:00–{s[3]:02d}:00","Tipo":s[4]}
                                 for s in SHIFTS]),
-                use_container_width=True, hide_index=True)
+             filename="horarios_turnos.csv", key="dl_horarios")
 
     if df_kpis.empty:
         st.info("Sin datos de sesiones.")
@@ -1332,7 +1386,7 @@ with tab_alerts:
                 "Estado":    "🔴 Sobrecargado" if load>100 else ("🟠 Alto" if load>70 else "🟢 Normal"),
             })
         if rows_cap:
-            st.dataframe(pd.DataFrame(rows_cap), use_container_width=True, hide_index=True)
+            show_table(pd.DataFrame(rows_cap), filename="capacidad_agentes.csv", key="dl_cap")
         else:
             st.info("No hay agentes en línea en este momento.")
 
@@ -1440,4 +1494,4 @@ with tab_trends:
         weeks_disp["FRT_avg"] = weeks_disp["FRT_avg"].apply(lambda x: fmt_mins(x) if pd.notna(x) else "—")
         weeks_disp["Res_pct"] = weeks_disp["Res_pct"].apply(lambda x: f"{x}%" if pd.notna(x) else "—")
         weeks_disp.columns = ["Semana","Sesiones","FRT promedio","Tasa resolución"]
-        st.dataframe(weeks_disp, use_container_width=True, hide_index=True)
+        show_table(weeks_disp, filename="comparativa_semanal.csv", key="dl_weeks")
