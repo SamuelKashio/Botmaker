@@ -449,10 +449,14 @@ def classify_abandoned_sessions(sessions: list) -> dict:
       3. El cierre NO fue manual por agente (no es spam/intencional)
       4. Verificado por API: ningún mensaje de agente posterior al inicio de sesión
 
+    Lógica para "never_assigned":
+      - Sin assigned-to-agent Y sin cierre → esperando activamente
+
     Los candidatos de "closed_no_response" se verifican en paralelo con la API.
     """
     # Fase 1: filtrar candidatos por eventos (rápido, sin API)
     candidates_cnr = []
+    never_assigned = []
     camp_no_reply  = []
 
     for s in sessions:
@@ -470,6 +474,8 @@ def classify_abandoned_sessions(sessions: list) -> dict:
                 # Excluir cierres manuales/intencionales por agente
                 if not was_manually_closed_by_agent(s):
                     candidates_cnr.append(s)
+            if not assigned and not closed:
+                never_assigned.append(s)
 
     # Fase 2: verificar con API de mensajes en paralelo (confirmar sin respuesta real)
     closed_no_resp = []
@@ -490,6 +496,7 @@ def classify_abandoned_sessions(sessions: list) -> dict:
 
     return {
         "closed_no_response": closed_no_resp,
+        "never_assigned":     never_assigned,
         "campaign_no_reply":  camp_no_reply,
     }
 
@@ -681,25 +688,11 @@ def compute_live_chat_metrics(chats: list, agents: list, now: datetime) -> dict:
     # Filtrar soporte vs comercial (sobre chats limpios)
     support   = [c for c in chats_clean if c.get("queueId","") in SUPPORT_QUEUES or not c.get("queueId")]
     comercial = [c for c in chats_clean if c.get("queueId","") in COMERCIAL_QUEUES]
-    # UNIFIED: chats sin agente asignado donde el usuario sí escribió
-    # (fusiona: sin agentId + sin queue/agente + nunca asignadas)
-    unattended_raw = [c for c in chats_clean
-                      if not c.get("agentId")
-                      and c.get("lastUserMessageDatetime", "")]
+    unassigned = [c for c in chats_clean if not c.get("agentId")]
 
-    # Calcular tiempo de espera para cada unattended (desde último msg de usuario)
-    unattended = []
-    for c in unattended_raw:
-        lu  = c.get("lastUserMessageDatetime", "")
-        dt  = parse_dt(lu)
-        wm  = (now - dt).total_seconds() / 60 if dt else 0
-        unattended.append({
-            **c,
-            "wait_min":  wm,
-            "wait_fmt":  fmt_mins(wm),
-            "sev_cls":   sev_cls(wm, SLA_WAIT_OK, SLA_WAIT_WARN),
-        })
-    unattended.sort(key=lambda x: x["wait_min"], reverse=True)
+    # Chats abandonados: sin queue y sin agente (excluye campañas)
+    abandoned_chats = [c for c in chats_clean
+                       if not c.get("queueId","") and not c.get("agentId","")]
 
     # Candidatos: bot muted + agente asignado
     candidates = [c for c in chats if c.get("isBotMuted") and c.get("agentId")]
@@ -756,7 +749,8 @@ def compute_live_chat_metrics(chats: list, agents: list, now: datetime) -> dict:
         "campaigns":        campaigns_raw,
         "support":          support,
         "comercial":        comercial,
-        "unattended":       unattended,
+        "unassigned":       unassigned,
+        "abandoned_chats":  abandoned_chats,
         "pending":          pending_with_wait,
         "chats_per_agent":  chats_per_agent,
         "wait_per_agent":   wait_per_agent,
@@ -826,20 +820,18 @@ def build_alerts(live: dict, df_kpis: pd.DataFrame,
     alerts = []
     ag_map = {a["id"]: a for a in agents}
 
-    # 1. Chats en espera sin agente (unificado)
-    n_unattended = len(live.get("unattended", []))
-    # Cuántos superan el SLA de espera
-    n_unt_warn = sum(1 for c in live.get("unattended", []) if c.get("wait_min",0) > SLA_WAIT_OK)
-    if n_unattended >= ALERT_UNASSIGNED_MAX:
+    # 1. Chats sin asignar
+    n_unassigned = len(live["unassigned"])
+    if n_unassigned >= ALERT_UNASSIGNED_MAX:
         alerts.append({"level":"crit",
-            "title": f"🚨 {n_unattended} chats sin agente asignado",
-            "body": f"Supera el umbral ({ALERT_UNASSIGNED_MAX}). {n_unt_warn} llevan más de {SLA_WAIT_OK}min esperando.",
-            "metric": n_unattended})
-    elif n_unattended > 0:
+            "title": f"🚨 {n_unassigned} chats sin asignar",
+            "body": "Supera el umbral máximo. Revisar cola y disponibilidad de agentes.",
+            "metric": n_unassigned})
+    elif n_unassigned > 0:
         alerts.append({"level":"warn",
-            "title": f"⚠️ {n_unattended} chats sin agente asignado",
-            "body": f"{n_unt_warn} llevan más de {SLA_WAIT_OK}min esperando respuesta.",
-            "metric": n_unattended})
+            "title": f"⚠️ {n_unassigned} chats sin asignar",
+            "body": "Chats en espera de asignación.",
+            "metric": n_unassigned})
 
     # 2. Chats con espera crítica (> SLA_WAIT_WARN minutos)
     critical_waits = [p for p in live["pending"] if p["wait_min"] > SLA_WAIT_WARN]
@@ -867,10 +859,10 @@ def build_alerts(live: dict, df_kpis: pd.DataFrame,
         aid    = ag.get("id","")
         chats_n = live["chats_per_agent"].get(aid, 0)
         # Solo alertar si hay chats sin asignar Y el agente no tiene nada
-        if chats_n == 0 and n_unattended > 0:
+        if chats_n == 0 and n_unassigned > 0:
             alerts.append({"level":"info",
                 "title": f"ℹ️ {ag.get('name','?')} en línea sin chats asignados",
-                "body":  f"Hay {n_unattended} chats esperando. Verificar si el agente está activo.",
+                "body":  f"Hay {n_unassigned} chats esperando. Verificar si el agente está activo.",
                 "metric": 0})
 
     # 5. SLA FRT comprometido
@@ -1124,17 +1116,14 @@ tab_rt, tab_sla, tab_team, tab_shifts, tab_alerts, tab_trends, tab_ai = st.tabs(
 with tab_rt:
     # KPI row — métricas de cola en tiempo real
     k1,k2,k3,k4,k5,k6 = st.columns(6)
-    n_unattended = len(live.get("unattended", []))
+    n_unassigned = len(live["unassigned"])
     n_pending    = len(live["pending"])
     n_online     = len(ag_on)
-    # Max wait: el peor caso entre pendientes (con agente) y sin agente
-    max_wait_pend = live["pending"][0]["wait_min"] if live["pending"] else 0
-    max_wait_unt  = live["unattended"][0]["wait_min"] if live.get("unattended") else 0
-    max_wait      = max(max_wait_pend, max_wait_unt)
+    max_wait     = live["pending"][0]["wait_min"] if live["pending"] else 0
 
-    with k1: kpi("En espera sin agente", n_unattended, "sin agentId · usuario escribió", "red",
-                 delta=f"⚠️ Umbral: {ALERT_UNASSIGNED_MAX}" if n_unattended >= ALERT_UNASSIGNED_MAX else "✅ OK",
-                 delta_good=(n_unattended < ALERT_UNASSIGNED_MAX))
+    with k1: kpi("Sin asignar",    n_unassigned,  "chats esperando agente", "red",
+                 delta=f"⚠️ Umbral: {ALERT_UNASSIGNED_MAX}" if n_unassigned >= ALERT_UNASSIGNED_MAX else "✅ OK",
+                 delta_good=(n_unassigned < ALERT_UNASSIGNED_MAX))
     with k2: kpi("Soporte N1",     len(live["support"]), "en cola soporte", "orange")
     with k3: kpi("Comercial",      len(live["comercial"]), "en cola comercial", "blue")
     with k4: kpi("Pend. respuesta",n_pending, "bot muted + agente", "purple")
@@ -1191,31 +1180,28 @@ with tab_rt:
         else:
             st.success("✅ Sin chats pendientes de respuesta.")
 
-        sh(f"En espera sin agente — {n_unattended}",
-           "sin agentId · usuario escribió · ordenado por espera")
-        if live.get("unattended"):
+        sh(f"Sin asignar — {n_unassigned}", "chats sin agentId · últimas 24h")
+        if live["unassigned"]:
             rows = []
-            for c in live["unattended"]:
+            for c in live["unassigned"]:
                 cid = get_chat_id(c)
                 rows.append({
-                    "⏱ Espera":   c["wait_fmt"],
-                    "Sev":        "🔴" if c["wait_min"]>sla_wait_warn else ("🟠" if c["wait_min"]>SLA_WAIT_OK else "🟢"),
                     "Nombre":     c.get("firstName","—"),
                     "País":       c.get("country","—"),
-                    "Queue":      c.get("queueId","") or "Sin queue",
+                    "Queue":      c.get("queueId","—"),
                     "🪟 WA":      "✅" if c.get("whatsAppWindowCloseDatetime","")>now_utc.isoformat()[:19] else "❌",
                     "Último msg": c.get("lastUserMessageDatetime","")[:16].replace("T"," "),
                     "🔗 Chat":    chat_url(cid),
                 })
             show_table(
                 pd.DataFrame(rows),
-                filename="en_espera_sin_agente.csv",
-                height=min(38*len(rows)+38, 360),
+                filename="sin_asignar.csv",
+                height=min(38*len(rows)+38, 300),
                 col_cfg={"🔗 Chat": st.column_config.LinkColumn("🔗 Chat", display_text="Ver chat")},
-                key="dl_unattended",
+                key="dl_sin_asignar",
             )
         else:
-            st.success("✅ Sin chats esperando asignación.")
+            st.success("✅ Sin chats sin asignar.")
 
     with col_r:
         sh("Por queue")
@@ -1263,16 +1249,19 @@ with tab_rt:
 
     # ── ATENCIÓN PERDIDA ──────────────────────────────────
     st.markdown("")
-    n_cnr        = len(abandoned["closed_no_response"])
-    n_unattended = len(live.get("unattended", []))
+    n_cnr = len(abandoned["closed_no_response"])
+    n_na  = len(abandoned["never_assigned"])
+    n_ab  = len(live.get("abandoned_chats", []))
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1: kpi("Cerradas sin respuesta", n_cnr,
-                 "timeout automático · agente nunca respondió", "red",
+                 "agente nunca respondió", "red",
                  delta="⚠️ Atención urgente" if n_cnr > 0 else "✅ OK",
                  delta_good=(n_cnr == 0))
-    with c2: kpi("En espera sin agente (ahora)", n_unattended,
-                 "sin agentId · usuario esperando respuesta", "orange")
+    with c2: kpi("Nunca asignadas (activas)", n_na,
+                 "esperando sin agente ni cierre", "orange")
+    with c3: kpi("Sin queue ni agente", n_ab,
+                 "chats sin atención del período", "coral")
 
     st.markdown("")
     col_a, col_b = st.columns(2)
@@ -1313,27 +1302,51 @@ with tab_rt:
             st.success("✅ Sin sesiones cerradas sin respuesta en el período.")
 
     with col_b:
-        sh(f"En espera sin agente — {n_unattended}",
-           "misma lista que la sección principal · detalle por sesión")
-        # Referencia: la tabla completa está arriba en la sección principal
-        # Aquí mostramos sólo las que están en cola específica de soporte
-        unt_soporte = [c for c in live.get("unattended",[])
-                       if c.get("queueId","") in SUPPORT_QUEUES]
-        if unt_soporte:
-            rows_uts = []
-            for c in unt_soporte:
-                cid = get_chat_id(c)
-                rows_uts.append({
-                    "⏱ Espera": c["wait_fmt"],
-                    "Nombre":   c.get("firstName","—"),
-                    "Queue":    c.get("queueId",""),
-                    "🔗 Chat":  chat_url(cid),
+        sh(f"Nunca asignadas (activas) — {n_na}",
+           "sin assigned-to-agent · conversación aún abierta")
+        if abandoned["never_assigned"]:
+            rows_na = []
+            for s in abandoned["never_assigned"]:
+                ci   = s.get("chat", {}).get("chat", {})
+                cid  = ci.get("chatId", "")
+                name = s.get("chat", {}).get("firstName", "—")
+                t0   = parse_dt(s.get("creationTime",""))
+                wait = fmt_mins((now_utc - t0).total_seconds()/60) if t0 else "—"
+                rows_na.append({
+                    "Cliente":   name,
+                    "Inicio":    s.get("creationTime","")[:16].replace("T"," "),
+                    "⏱ Espera": wait,
+                    "Causa":     s.get("startingCause",""),
+                    "🔗 Chat":   chat_url(cid),
                 })
-            show_table(pd.DataFrame(rows_uts), filename="en_espera_soporte.csv",
-                       col_cfg={"🔗 Chat": st.column_config.LinkColumn("🔗 Chat", display_text="Ver chat")},
-                       key="dl_unt_soporte")
+            show_table(
+                pd.DataFrame(rows_na),
+                filename="nunca_asignadas.csv",
+                col_cfg={"🔗 Chat": st.column_config.LinkColumn(
+                    "🔗 Chat", display_text="Ver chat")},
+                key="dl_na",
+            )
         else:
-            st.info("Sin chats de soporte esperando asignación.")
+            st.success("✅ Sin conversaciones activas sin asignar.")
+
+    if live.get("abandoned_chats"):
+        sh(f"Chats sin queue ni agente — {n_ab}", "contactos sin atención del período")
+        rows_ab = []
+        for c in live["abandoned_chats"]:
+            cid = get_chat_id(c)
+            rows_ab.append({
+                "Cliente":    c.get("firstName","—"),
+                "País":       c.get("country","—"),
+                "Último msg": c.get("lastUserMessageDatetime","")[:16].replace("T"," "),
+                "🔗 Chat":    chat_url(cid),
+            })
+        show_table(
+            pd.DataFrame(rows_ab),
+            filename="chats_sin_atencion.csv",
+            col_cfg={"🔗 Chat": st.column_config.LinkColumn(
+                "🔗 Chat", display_text="Ver chat")},
+            key="dl_ab",
+        )
 
 
 # ══════════════════════════════════════════════════════════
@@ -1688,10 +1701,9 @@ with tab_alerts:
 
     with col_l:
         # Gauge de carga de cola
-        total_slots    = sum(a.get("slots",1) or 1 for a in ag_list if a.get("isOnline"))
-        total_chats    = len(live.get("all_clean", cht_raw))   # excluye campañas
-        n_unattended_a = len(live.get("unattended", []))
-        load_pct       = round(total_chats / max(total_slots, 1) * 100)
+        total_slots = sum(a.get("slots",1) or 1 for a in ag_list if a.get("isOnline"))
+        total_chats = len(cht_raw)
+        load_pct    = round(total_chats / max(total_slots, 1) * 100)
         lc = C_RED if load_pct>90 else (C_ORANGE if load_pct>65 else C_GREEN)
 
         fg = go.Figure(go.Indicator(
@@ -1733,19 +1745,6 @@ with tab_alerts:
             show_table(pd.DataFrame(rows_cap), filename="capacidad_agentes.csv", key="dl_cap")
         else:
             st.info("No hay agentes en línea en este momento.")
-
-        # Resumen de chats en espera sin agente
-        if n_unattended_a > 0:
-            top_wait = live["unattended"][0]
-            st.markdown(
-                f'<div class="alert-warn" style="margin-top:10px">'
-                f'<div class="alert-title">⏳ {n_unattended_a} chats sin agente asignado</div>'
-                f'<div class="alert-body">El más antiguo lleva '
-                f'<b>{top_wait["wait_fmt"]}</b> esperando · '
-                f'{top_wait.get("firstName","?")} · {top_wait.get("queueId","Sin queue")}</div>'
-                f'</div>',
-                unsafe_allow_html=True
-            )
 
     # ── Historial de espera de chats pendientes ───────────
     if live["pending"]:
