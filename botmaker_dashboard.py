@@ -858,13 +858,14 @@ st.markdown(f"""<div style="display:flex;align-items:center;gap:12px;margin-bott
 # ══════════════════════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════════════════════
-tab_rt, tab_sla, tab_team, tab_shifts, tab_alerts, tab_trends = st.tabs([
+tab_rt, tab_sla, tab_team, tab_shifts, tab_alerts, tab_trends, tab_ai = st.tabs([
     "🔴 Tiempo Real",
     "⚡ SLA & Tiempos",
     "👥 Equipo",
     "📋 Turnos",
     f"🚨 Alertas {'🔴' if n_crit else '✅'}",
     "📊 Tendencias",
+    "🧠 Análisis IA",
 ])
 
 
@@ -1495,3 +1496,491 @@ with tab_trends:
         weeks_disp["Res_pct"] = weeks_disp["Res_pct"].apply(lambda x: f"{x}%" if pd.notna(x) else "—")
         weeks_disp.columns = ["Semana","Sesiones","FRT promedio","Tasa resolución"]
         show_table(weeks_disp, filename="comparativa_semanal.csv", key="dl_weeks")
+
+
+# ══════════════════════════════════════════════════════════
+# TAB 7 — ANÁLISIS IA
+# ══════════════════════════════════════════════════════════
+with tab_ai:
+
+    # ── Verificar API Key de Anthropic ───────────────────
+    try:
+        ANTHROPIC_KEY = st.secrets["ANTHROPIC_API_KEY"]
+        has_ai = True
+    except Exception:
+        has_ai = False
+        st.markdown(f"""
+        <div style="background:rgba(217,119,6,.08);border:1px solid rgba(217,119,6,.3);
+                    border-left:4px solid {C_ORANGE};border-radius:0 10px 10px 0;
+                    padding:16px 20px;margin:10px 0">
+          <div style="font-family:'Syne',sans-serif;font-size:.9rem;font-weight:700;color:{C_ORANGE}">
+            ⚙️ Configurá tu API Key de Anthropic
+          </div>
+          <div style="font-size:.82rem;color:{MUTED};margin-top:6px;line-height:1.6">
+            Para usar el análisis de IA agregá tu clave en <b>Settings → Secrets</b> de Streamlit:
+          </div>
+        </div>""", unsafe_allow_html=True)
+        st.code('[secrets]\nBOTMAKER_TOKEN    = "tu_token_botmaker"\nANTHROPIC_API_KEY = "sk-ant-..."',
+                language="toml")
+        st.markdown(f'<div style="font-size:.8rem;color:{MUTED};margin-top:8px">'
+                    f'Obtenés tu clave en <a href="https://console.anthropic.com" target="_blank" '
+                    f'style="color:{C_BLUE}">console.anthropic.com</a> → API Keys. '
+                    f'El costo estimado es ~$0.50–$2 por análisis de 100 conversaciones.</div>',
+                    unsafe_allow_html=True)
+
+    if has_ai:
+        st.markdown(f"""
+        <h3 style="font-family:'Syne',sans-serif;font-weight:800;margin-bottom:4px">
+          🧠 Análisis inteligente de conversaciones
+        </h3>
+        <div style="color:{MUTED};font-size:.82rem;margin-bottom:18px">
+          Claude lee las conversaciones reales de tus clientes y detecta temas, sentimiento,
+          problemas recurrentes y oportunidades de mejora.
+        </div>""", unsafe_allow_html=True)
+
+        # ── Controles ────────────────────────────────────
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            ai_n_chats = st.number_input(
+                "Nº de chats a analizar", min_value=5, max_value=200, value=30,
+                help="Más chats = análisis más preciso pero más lento y costoso. ~5s por chat.")
+        with c2:
+            ai_days = st.number_input(
+                "Últimos N días", min_value=1, max_value=30, value=7)
+        with c3:
+            ai_queue = st.selectbox(
+                "Filtrar queue", ["Todas","Soporte N1","Comercial","_default_"], key="ai_queue")
+        with c4:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            run_ai = st.button("🚀 Analizar conversaciones", key="run_ai")
+
+        # ── Función: traer mensajes de un chat ────────────
+        def fetch_chat_messages(chat_id: str, list_url: str = "") -> list[dict]:
+            """
+            Llama a /messages?chat-id=X y retorna los mensajes del chat.
+            Usa listMessagesURL si está disponible (ya incluye el chat-id).
+            """
+            try:
+                if list_url:
+                    r = requests.get(list_url, headers=hdrs(), timeout=15)
+                else:
+                    r = requests.get(f"{BASE_URL}/messages",
+                                     headers=hdrs(),
+                                     params={"chat-id": chat_id,
+                                             "long-term-search": "true"},
+                                     timeout=15)
+                if r.status_code == 200:
+                    return its(r.json())
+                return []
+            except Exception:
+                return []
+
+        def msgs_to_text(messages: list[dict]) -> str:
+            """
+            Convierte lista de mensajes a texto legible para Claude.
+            Sólo incluye mensajes de texto del usuario y del agente.
+            """
+            lines = []
+            for m in messages:
+                origin = m.get("from", "?")
+                content = m.get("content", {})
+                if isinstance(content, dict):
+                    text = content.get("text", "")
+                    if not text:
+                        text = f"[{content.get('type','media')}]"
+                else:
+                    text = str(content)
+                if text.strip():
+                    label = "CLIENTE" if origin == "user" else ("AGENTE" if origin == "agent" else "BOT")
+                    lines.append(f"{label}: {text.strip()}")
+            return "\n".join(lines[:40])  # máx 40 mensajes por chat para controlar tokens
+
+        # ── Función: analizar lote de chats con Claude ────
+        def analyze_batch(conversations: list[dict]) -> list[dict]:
+            """
+            Envía un lote de conversaciones a Claude Sonnet.
+            Retorna lista de clasificaciones estructuradas.
+            Cada item: {chat_id, tema, subtema, sentimiento, urgencia,
+                        resuelto, problema_raiz, insight}
+            """
+            # Construir el prompt con todas las conversaciones del lote
+            conv_blocks = []
+            for i, conv in enumerate(conversations):
+                conv_blocks.append(
+                    f"--- CONVERSACIÓN {i+1} (ID: {conv['chat_id']}) ---\n{conv['text']}"
+                )
+            all_convs = "\n\n".join(conv_blocks)
+
+            prompt = f"""Eres un experto en análisis de operaciones de soporte al cliente.
+Analiza las siguientes {len(conversations)} conversaciones de soporte en español y clasifica cada una.
+
+{all_convs}
+
+Para CADA conversación devuelve un objeto JSON con exactamente estos campos:
+- "chat_id": el ID que aparece en el encabezado
+- "tema": categoría principal (ej: "Consulta de pedido", "Problema de pago", "Soporte técnico", "Información de producto", "Queja", "Cambio/devolución", "Facturación", "Otro")
+- "subtema": descripción más específica en máximo 5 palabras
+- "sentimiento": exactamente uno de: "Positivo", "Neutro", "Frustrado", "Urgente", "Insatisfecho"
+- "urgencia": "Alta", "Media" o "Baja"
+- "resuelto": true o false según si el problema fue resuelto en la conversación
+- "problema_raiz": la causa raíz del contacto en máximo 8 palabras
+- "insight": una observación accionable breve para el supervisor (máximo 15 palabras)
+
+Responde ÚNICAMENTE con un array JSON válido, sin texto adicional, sin markdown, sin explicaciones.
+Ejemplo de formato: [{{"chat_id":"ABC123","tema":"Consulta de pedido","subtema":"estado de envío","sentimiento":"Neutro","urgencia":"Media","resuelto":true,"problema_raiz":"cliente no recibió notificación de envío","insight":"Automatizar notificación reduciría este tipo de consulta"}}]"""
+
+            try:
+                r = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": ANTHROPIC_KEY,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": "claude-sonnet-4-20250514",
+                        "max_tokens": 4096,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                    timeout=60,
+                )
+                if r.status_code == 200:
+                    raw = r.json()["content"][0]["text"].strip()
+                    # Limpiar posibles backticks de markdown
+                    if raw.startswith("```"):
+                        raw = raw.split("```")[1]
+                        if raw.startswith("json"):
+                            raw = raw[4:]
+                    return json.loads(raw)
+                else:
+                    return []
+            except Exception as e:
+                return []
+
+        def generate_summary_insights(df_results: pd.DataFrame) -> str:
+            """
+            Pide a Claude un resumen ejecutivo de todos los resultados clasificados.
+            """
+            stats = {
+                "total":           len(df_results),
+                "temas":           df_results["Tema"].value_counts().to_dict(),
+                "sentimientos":    df_results["Sentimiento"].value_counts().to_dict(),
+                "tasa_resolucion": f"{round(df_results['Resuelto'].mean()*100,1)}%",
+                "urgentes":        int((df_results["Urgencia"]=="Alta").sum()),
+                "top_problemas":   df_results["Problema raíz"].value_counts().head(5).to_dict(),
+            }
+            prompt = f"""Eres supervisor senior de soporte al cliente. Analiza estos datos de {stats['total']} conversaciones y genera un informe ejecutivo en español.
+
+Datos:
+- Temas: {stats['temas']}
+- Sentimientos: {stats['sentimientos']}
+- Tasa de resolución: {stats['tasa_resolucion']}
+- Conversaciones urgentes: {stats['urgentes']}
+- Top problemas raíz: {stats['top_problemas']}
+
+Escribe un informe ejecutivo con estas secciones (usa Markdown con ##):
+## Resumen ejecutivo (2-3 oraciones)
+## Hallazgos clave (3-5 bullets concretos con números)
+## Problemas recurrentes (qué se repite y por qué es importante)
+## Oportunidades de mejora (acciones específicas y accionables)
+## Alertas para el supervisor (si hay algo urgente que atender)
+
+Sé específico, directo y accionable. Máximo 300 palabras total."""
+
+            try:
+                r = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": ANTHROPIC_KEY,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": "claude-sonnet-4-20250514",
+                        "max_tokens": 1024,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                    timeout=45,
+                )
+                if r.status_code == 200:
+                    return r.json()["content"][0]["text"]
+                return ""
+            except Exception:
+                return ""
+
+        # ── EJECUCIÓN ─────────────────────────────────────
+        if run_ai:
+            # 1. Traer chats del período
+            ai_from = (now_utc - timedelta(days=ai_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            with st.spinner("Cargando lista de chats…"):
+                sc_ai, d_ai = api_get("chats", {"from": ai_from})
+
+            if sc_ai != 200:
+                st.error(f"Error al cargar chats: {d_ai}")
+                st.stop()
+
+            all_chats = its(d_ai)
+            if ai_queue != "Todas":
+                all_chats = [c for c in all_chats if c.get("queueId","") == ai_queue]
+
+            # Tomar solo los N más recientes
+            all_chats = sorted(
+                all_chats,
+                key=lambda c: c.get("lastUserMessageDatetime",""),
+                reverse=True
+            )[:ai_n_chats]
+
+            if not all_chats:
+                st.warning("No se encontraron chats para el período y filtros seleccionados.")
+                st.stop()
+
+            st.markdown(f'<div style="font-size:.82rem;color:{MUTED};margin-bottom:12px">'
+                        f'Procesando <b style="color:{TEXT}">{len(all_chats)}</b> conversaciones '
+                        f'de los últimos {ai_days} días...</div>', unsafe_allow_html=True)
+
+            # 2. Traer mensajes de cada chat
+            progress_bar  = st.progress(0)
+            status_text   = st.empty()
+            conversations = []
+
+            for i, chat in enumerate(all_chats):
+                chat_id  = get_chat_id(chat)
+                list_url = chat.get("listMessagesURL", "")
+                status_text.markdown(
+                    f'<div style="font-size:.78rem;color:{MUTED}">'
+                    f'📥 Leyendo mensajes {i+1}/{len(all_chats)}: '
+                    f'<b style="color:{TEXT}">{chat.get("firstName","?")}</b></div>',
+                    unsafe_allow_html=True
+                )
+                msgs = fetch_chat_messages(chat_id, list_url)
+                text = msgs_to_text(msgs)
+                if text.strip():
+                    conversations.append({
+                        "chat_id":    chat_id,
+                        "chat_url":   chat_url(chat_id),
+                        "client":     chat.get("firstName","—"),
+                        "agent":      next((a["name"] for a in ag_list
+                                           if a["id"] == chat.get("agentId","")), "—"),
+                        "queue":      chat.get("queueId","—"),
+                        "date":       chat.get("lastUserMessageDatetime","")[:10],
+                        "text":       text,
+                    })
+                progress_bar.progress((i+1) / len(all_chats) * 0.5)
+
+            if not conversations:
+                st.warning("No se encontraron mensajes de texto en los chats seleccionados.")
+                st.stop()
+
+            # 3. Analizar con Claude en lotes de 10
+            BATCH_SIZE = 10
+            all_results = []
+            batches = [conversations[i:i+BATCH_SIZE]
+                       for i in range(0, len(conversations), BATCH_SIZE)]
+
+            for bi, batch in enumerate(batches):
+                status_text.markdown(
+                    f'<div style="font-size:.78rem;color:{MUTED}">'
+                    f'🧠 Analizando con Claude: lote {bi+1}/{len(batches)} '
+                    f'({len(batch)} conversaciones)...</div>',
+                    unsafe_allow_html=True
+                )
+                results = analyze_batch(batch)
+                if results:
+                    # Enriquecer con metadata del chat original
+                    for res in results:
+                        orig = next((c for c in batch if c["chat_id"] == res.get("chat_id","")), {})
+                        res["client"]   = orig.get("client","—")
+                        res["agent"]    = orig.get("agent","—")
+                        res["queue"]    = orig.get("queue","—")
+                        res["date"]     = orig.get("date","—")
+                        res["chat_url"] = orig.get("chat_url","")
+                    all_results.extend(results)
+                progress_bar.progress(0.5 + (bi+1) / len(batches) * 0.45)
+
+            if not all_results:
+                st.error("Claude no pudo procesar las conversaciones. Verificá tu API Key.")
+                st.stop()
+
+            # 4. Generar resumen ejecutivo
+            status_text.markdown(
+                f'<div style="font-size:.78rem;color:{MUTED}">✍️ Generando informe ejecutivo...</div>',
+                unsafe_allow_html=True
+            )
+            df_res = pd.DataFrame(all_results).rename(columns={
+                "tema":          "Tema",
+                "subtema":       "Subtema",
+                "sentimiento":   "Sentimiento",
+                "urgencia":      "Urgencia",
+                "resuelto":      "Resuelto",
+                "problema_raiz": "Problema raíz",
+                "insight":       "Insight",
+                "client":        "Cliente",
+                "agent":         "Agente",
+                "queue":         "Queue",
+                "date":          "Fecha",
+                "chat_url":      "🔗 Chat",
+            })
+            summary_md = generate_summary_insights(df_res)
+            progress_bar.progress(1.0)
+            status_text.empty()
+
+            # ── RESULTADOS ────────────────────────────────
+            st.markdown(f'<div style="background:{C_GREEN}15;border:1px solid {C_GREEN}30;'
+                        f'border-radius:10px;padding:10px 16px;font-size:.8rem;color:{C_GREEN};'
+                        f'margin-bottom:16px">✅ Análisis completado: '
+                        f'<b>{len(df_res)}</b> conversaciones clasificadas</div>',
+                        unsafe_allow_html=True)
+
+            # KPIs del análisis
+            k1,k2,k3,k4,k5 = st.columns(5)
+            n_temas    = df_res["Tema"].nunique()
+            n_frustr   = int((df_res["Sentimiento"].isin(["Frustrado","Insatisfecho"])).sum())
+            n_urgentes = int((df_res["Urgencia"]=="Alta").sum())
+            res_pct    = round(df_res["Resuelto"].mean()*100, 1) if "Resuelto" in df_res else 0
+            top_tema   = df_res["Tema"].mode()[0] if len(df_res) else "—"
+            with k1: kpi("Chats analizados", len(df_res),  f"{ai_days}d · {ai_queue}", "blue")
+            with k2: kpi("Temas detectados", n_temas,       "categorías únicas",        "purple")
+            with k3: kpi("Frustrados/Insatisfechos", n_frustr, f"{round(n_frustr/len(df_res)*100)}% del total", "red")
+            with k4: kpi("Urgencia alta",    n_urgentes,   f"{round(n_urgentes/len(df_res)*100)}% del total","orange")
+            with k5: kpi("Tasa resolución",  f"{res_pct}%","conversaciones resueltas",  "green")
+
+            st.markdown("")
+
+            # ── Informe ejecutivo ─────────────────────────
+            sh("📋 Informe ejecutivo generado por IA")
+            st.markdown(
+                f'<div style="background:{S1};border:1px solid {BORDER};border-radius:12px;'
+                f'padding:20px 24px;line-height:1.7;font-size:.84rem;color:{TEXT};">'
+                + summary_md.replace("\n", "<br>")
+                  .replace("## ", f'<br><b style="font-family:Syne,sans-serif;'
+                                   f'font-size:.85rem;color:{C_BLUE};letter-spacing:.06em">')
+                  .replace("\n", "</b><br>")
+                + '</div>',
+                unsafe_allow_html=True
+            )
+
+            st.markdown("")
+            col_l, col_r = st.columns(2)
+
+            with col_l:
+                # Treemap de temas
+                sh("Temas más frecuentes")
+                tema_counts = df_res.groupby(["Tema","Subtema"]).size().reset_index(name="n")
+                if len(tema_counts) > 0:
+                    ftree = px.treemap(
+                        tema_counts,
+                        path=["Tema","Subtema"],
+                        values="n",
+                        color="n",
+                        color_continuous_scale=[S2, C_BLUE, C_GREEN],
+                        hover_data={"n": True},
+                    )
+                    ftree.update_layout(**L(margin=dict(l=0,r=0,t=10,b=0),
+                                            coloraxis_showscale=False))
+                    ftree.update_traces(textfont_size=13)
+                    pf(ftree, height=340)
+
+                # Barras de temas
+                sh("Distribución por tema")
+                tc = df_res["Tema"].value_counts().reset_index()
+                tc.columns = ["Tema","n"]
+                fbar = px.bar(tc, x="n", y="Tema", orientation="h",
+                              color="n", color_continuous_scale=[S2, C_BLUE],
+                              text="n")
+                fbar.update_layout(**L(coloraxis_showscale=False,
+                                        margin=dict(l=160,r=50,t=10,b=10)))
+                fbar.update_traces(marker_cornerradius=4, textposition="outside")
+                pf(fbar)
+
+            with col_r:
+                # Donut de sentimiento
+                sh("Distribución de sentimiento")
+                sent_colors = {
+                    "Positivo":    C_GREEN,
+                    "Neutro":      C_SKY,
+                    "Frustrado":   C_ORANGE,
+                    "Urgente":     C_RED,
+                    "Insatisfecho":C_PURPLE,
+                }
+                sc_df = df_res["Sentimiento"].value_counts().reset_index()
+                sc_df.columns = ["Sentimiento","n"]
+                fsent = px.pie(sc_df, names="Sentimiento", values="n", hole=0.58,
+                               color="Sentimiento",
+                               color_discrete_map=sent_colors)
+                fsent.update_layout(**L(margin=dict(l=0,r=0,t=10,b=0)))
+                pf(fsent, height=260)
+
+                # Urgencia
+                sh("Urgencia de las conversaciones")
+                urg_df = df_res["Urgencia"].value_counts().reset_index()
+                urg_df.columns = ["Urgencia","n"]
+                furg = go.Figure(go.Bar(
+                    x=urg_df["Urgencia"], y=urg_df["n"],
+                    marker_color=[{"Alta":C_RED,"Media":C_ORANGE,"Baja":C_GREEN}.get(u,C_BLUE)
+                                  for u in urg_df["Urgencia"]],
+                    text=urg_df["n"], textposition="outside",
+                    marker_cornerradius=6,
+                ))
+                furg.update_layout(**L(showlegend=False, margin=dict(l=10,r=10,t=10,b=30)))
+                pf(furg, height=200)
+
+                # Resuelto vs No resuelto
+                sh("Tasa de resolución por tema")
+                res_by_tema = df_res.groupby("Tema")["Resuelto"].mean().reset_index()
+                res_by_tema["Resuelto"] = (res_by_tema["Resuelto"] * 100).round(1)
+                res_by_tema = res_by_tema.sort_values("Resuelto")
+                fres = px.bar(res_by_tema, x="Resuelto", y="Tema", orientation="h",
+                              color="Resuelto",
+                              color_continuous_scale=[C_RED, C_ORANGE, C_GREEN],
+                              text=res_by_tema["Resuelto"].apply(lambda x: f"{x:.0f}%"))
+                fres.update_layout(**L(coloraxis_showscale=False,
+                                        margin=dict(l=160,r=60,t=10,b=10),
+                                        xaxis_range=[0,110]))
+                fres.update_traces(marker_cornerradius=4, textposition="outside")
+                pf(fres)
+
+            # ── Heatmap tema × sentimiento ────────────────
+            sh("Cruce: Tema × Sentimiento")
+            cross = df_res.groupby(["Tema","Sentimiento"]).size().reset_index(name="n")
+            pivot = cross.pivot(index="Tema", columns="Sentimiento", values="n").fillna(0)
+            fcross = px.imshow(pivot, aspect="auto",
+                               color_continuous_scale=[S1, S3, C_ORANGE, C_RED],
+                               text_auto=True,
+                               labels={"color":"Conversaciones"})
+            fcross.update_layout(**L(margin=dict(l=180,r=10,t=10,b=60)))
+            pf(fcross)
+
+            # ── Tabla detallada con link ──────────────────
+            sh("Detalle de clasificación por conversación")
+            df_table = df_res[["Fecha","Cliente","Agente","Queue","Tema","Subtema",
+                                "Sentimiento","Urgencia","Resuelto","Problema raíz",
+                                "Insight","🔗 Chat"]].copy()
+            df_table["Resuelto"] = df_table["Resuelto"].map({True:"✅",False:"❌"})
+
+            show_table(
+                df_table,
+                filename="analisis_ia_conversaciones.csv",
+                col_cfg={"🔗 Chat": st.column_config.LinkColumn(
+                    "🔗 Chat", display_text="Ver chat")},
+                key="dl_ai_results",
+            )
+
+            # ── Insights únicos agrupados ─────────────────
+            sh("💡 Insights accionables detectados por IA")
+            insights = df_res["Insight"].dropna().tolist()
+            if insights:
+                # Agrupar insights similares mostrándolos como cards
+                cols_ins = st.columns(2)
+                for i, ins in enumerate(insights[:20]):
+                    with cols_ins[i % 2]:
+                        tema_i = df_res.iloc[i]["Tema"] if i < len(df_res) else ""
+                        tc = SHIFT_PAL.get(df_res.iloc[i]["Agente"] if i < len(df_res) else "", C_BLUE)
+                        st.markdown(
+                            f'<div style="background:{S1};border:1px solid {BORDER};'
+                            f'border-left:3px solid {C_PURPLE};border-radius:0 8px 8px 0;'
+                            f'padding:10px 14px;margin:4px 0;font-size:.78rem;">'
+                            f'<span style="font-size:.65rem;color:{MUTED};text-transform:uppercase;'
+                            f'letter-spacing:.08em">{tema_i}</span><br>'
+                            f'<span style="color:{TEXT}">{ins}</span></div>',
+                            unsafe_allow_html=True
+                        )
