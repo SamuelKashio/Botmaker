@@ -34,6 +34,7 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timedelta, timezone
 from collections import Counter, defaultdict
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -468,30 +469,59 @@ def compute_session_kpis(sessions: list) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
-def get_last_message_sender(chat_id: str, list_url: str = "") -> str:
+def get_last_message_sender(chat_id: str) -> str:
     """
-    Trae los últimos mensajes del chat y devuelve quién envió el último:
-    'user', 'agent', 'bot' o '' si no se pudo determinar.
-    Hace UNA sola llamada a la API con limit bajo para ser rápido.
+    Llama a /messages?chat-id=X&long-term-search=true y devuelve
+    quién envió el ÚLTIMO mensaje humano del chat: 'user' | 'agent' | ''.
+
+    La API requiere long-term-search=true siempre que el rango supere
+    las últimas horas. Los mensajes vienen ordenados del más ANTIGUO al
+    más NUEVO (orden cronológico), así que tomamos el ÚLTIMO de la lista
+    que sea de 'user' o 'agent'.
     """
     try:
-        url    = list_url or f"{BASE_URL}/messages"
-        params = {} if list_url else {"chat-id": chat_id}
-        r = requests.get(url, headers=hdrs(), params=params, timeout=8)
+        r = requests.get(
+            f"{BASE_URL}/messages",
+            headers=hdrs(),
+            params={"chat-id": chat_id, "long-term-search": "true"},
+            timeout=10,
+        )
         if r.status_code != 200:
             return ""
         messages = its(r.json())
         if not messages:
             return ""
-        # Los mensajes vienen ordenados del más nuevo al más viejo
-        # Buscar el último mensaje que sea del usuario o del agente (ignorar bot)
-        for msg in messages:
+        # Recorrer de más reciente a más antiguo (reverse)
+        for msg in reversed(messages):
             sender = msg.get("from", "")
             if sender in ("user", "agent"):
                 return sender
         return ""
     except Exception:
         return ""
+
+
+def get_last_senders_parallel(candidates: list[dict]) -> dict[str, str]:
+    """
+    Llama a get_last_message_sender en paralelo para todos los candidatos.
+    Retorna dict {chat_id: last_sender}.
+    Usa hasta 10 workers simultáneos para no saturar la API.
+    """
+    results = {}
+    if not candidates:
+        return results
+    with ThreadPoolExecutor(max_workers=min(10, len(candidates))) as ex:
+        futures = {
+            ex.submit(get_last_message_sender, get_chat_id(c)): get_chat_id(c)
+            for c in candidates
+        }
+        for future in as_completed(futures):
+            chat_id = futures[future]
+            try:
+                results[chat_id] = future.result()
+            except Exception:
+                results[chat_id] = ""
+    return results
 
 
 def compute_live_chat_metrics(chats: list, agents: list, now: datetime) -> dict:
@@ -517,19 +547,18 @@ def compute_live_chat_metrics(chats: list, agents: list, now: datetime) -> dict:
     # Candidatos: bot muted + agente asignado
     candidates = [c for c in chats if c.get("isBotMuted") and c.get("agentId")]
 
-    # Para cada candidato verificar quién envió el último mensaje
+    # Verificar en paralelo quién envió el último mensaje de cada candidato
+    last_senders = get_last_senders_parallel(candidates)
+
     pending_with_wait = []
     for c in candidates:
-        chat_id  = get_chat_id(c)
-        list_url = c.get("listMessagesURL", "")
+        chat_id     = get_chat_id(c)
+        last_sender = last_senders.get(chat_id, "")
 
-        last_sender = get_last_message_sender(chat_id, list_url)
-
-        # Solo incluir si el último mensaje fue del usuario
-        # Si no se pudo determinar (error de red, sin mensajes) se incluye
-        # para no perder chats reales — mejor falso positivo que falso negativo
+        # Excluir si el agente fue el último en responder
+        # Si no se pudo determinar (last_sender==""), incluir por precaución
         if last_sender == "agent":
-            continue  # el agente ya respondió → no está pendiente
+            continue
 
         lu = c.get("lastUserMessageDatetime", "")
         dt = parse_dt(lu)
@@ -539,11 +568,11 @@ def compute_live_chat_metrics(chats: list, agents: list, now: datetime) -> dict:
         ag  = ag_map.get(aid, {})
         pending_with_wait.append({
             **c,
-            "wait_min":    wait_min,
-            "wait_fmt":    fmt_mins(wait_min),
-            "sev_cls":     sev_cls(wait_min, SLA_WAIT_OK, SLA_WAIT_WARN),
-            "agent_name":  ag.get("name", "—"),
-            "last_sender": last_sender,   # 'user' o ''
+            "wait_min":   wait_min,
+            "wait_fmt":   fmt_mins(wait_min),
+            "sev_cls":    sev_cls(wait_min, SLA_WAIT_OK, SLA_WAIT_WARN),
+            "agent_name": ag.get("name", "—"),
+            "last_sender": last_sender,
         })
 
     pending_with_wait.sort(key=lambda x: x["wait_min"], reverse=True)
@@ -869,7 +898,7 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════
 # CARGA DE DATOS (una sola vez por render)
 # ══════════════════════════════════════════════════════════
-with st.spinner("Cargando datos… (verificando último mensaje por chat pendiente)"):
+with st.spinner("Cargando datos…"):
     sc_ag,  d_ag  = api_get("agents")
     sc_ag2, d_ag2 = api_get("agents", {"online":"true"})
     sc_ch,  d_ch  = api_get("chats",  {"from": FROM_24H})
@@ -958,7 +987,8 @@ with tab_rt:
 
     with col_l:
         # Tabla de pendientes con tiempo de espera
-        sh(f"Chats pendientes de respuesta — {n_pending}", "bot silenciado + agente asignado")
+        sh(f"Chats pendientes de respuesta — {n_pending}",
+           "último mensaje del cliente · verificado en tiempo real")
         if live["pending"]:
             rows = []
             for c in live["pending"]:
