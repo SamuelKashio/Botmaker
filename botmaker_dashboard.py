@@ -361,6 +361,66 @@ def parse_dt(s: str) -> Optional[datetime]:
     try: return datetime.fromisoformat(s.replace("Z","+00:00"))
     except: return None
 
+# Template de campaña outbound de Kashio — primer fragmento único para detección
+CAMPAIGN_TEMPLATE_FRAGMENT = "gracias por interesarte en nuestras soluciones de cobranza"
+
+def is_campaign_chat(chat: dict) -> bool:
+    """
+    Detecta si un chat es una campaña comercial outbound de Kashio.
+    Criterios (cualquiera es suficiente):
+      1. variables.platformContactId existe → chat iniciado por Kashio vía API outbound
+      2. No tiene lastUserMessageDatetime → el usuario nunca respondió (solo recibió)
+    """
+    vars_ = chat.get("variables", {}) or {}
+    if "platformContactId" in vars_:
+        return True
+    # Sin mensaje de usuario = envío masivo sin respuesta
+    if not chat.get("lastUserMessageDatetime", ""):
+        return True
+    return False
+
+def is_campaign_session(session: dict) -> bool:
+    """
+    Detecta si una sesión corresponde a una campaña comercial.
+    Criterio: startingCause == WhatsAppTemplate
+    """
+    return session.get("startingCause", "") == "WhatsAppTemplate"
+
+def classify_abandoned_sessions(sessions: list) -> dict:
+    """
+    Clasifica sesiones en categorías operativas para métricas de atención perdida.
+    Retorna dict con listas:
+      - closed_no_response : cerradas sin ningún reply de agente
+      - never_assigned     : sin evento assigned-to-agent (y sin cierre por bot)
+      - campaign_no_reply  : campaña donde el contacto no respondió
+    """
+    closed_no_resp  = []
+    never_assigned  = []
+    camp_no_reply   = []
+
+    for s in sessions:
+        evs      = [e["name"] for e in s.get("events", [])]
+        is_camp  = is_campaign_session(s)
+        assigned = "assigned-to-agent" in evs
+        replied  = "agent-action"       in evs
+        closed   = "conversation-close" in evs
+
+        if is_camp:
+            # Campaña sin respuesta del contacto (no hubo assigned-to-agent)
+            if not assigned:
+                camp_no_reply.append(s)
+        else:
+            if closed and not replied:
+                closed_no_resp.append(s)
+            if not assigned and not closed:
+                never_assigned.append(s)
+
+    return {
+        "closed_no_response": closed_no_resp,
+        "never_assigned":     never_assigned,
+        "campaign_no_reply":  camp_no_reply,
+    }
+
 def to_lima_str(dt: datetime) -> str:
     return (dt + LIMA_OFFSET).strftime("%d/%m %H:%M")
 
@@ -411,6 +471,9 @@ def compute_session_kpis(sessions: list) -> pd.DataFrame:
     """
     rows = []
     for s in sessions:
+        # Excluir campañas comerciales de las métricas de soporte
+        if is_campaign_session(s):
+            continue
         t0       = parse_dt(s.get("creationTime",""))
         if not t0: continue
 
@@ -539,10 +602,18 @@ def compute_live_chat_metrics(chats: list, agents: list, now: datetime) -> dict:
     """
     ag_map = {a["id"]: a for a in agents}
 
-    # Filtrar soporte vs comercial
-    support   = [c for c in chats if c.get("queueId","") in SUPPORT_QUEUES or not c.get("queueId")]
-    comercial = [c for c in chats if c.get("queueId","") in COMERCIAL_QUEUES]
-    unassigned = [c for c in chats if not c.get("agentId")]
+    # Separar campañas ANTES de cualquier otra clasificación
+    campaigns_raw = [c for c in chats if is_campaign_chat(c)]
+    chats_clean   = [c for c in chats if not is_campaign_chat(c)]
+
+    # Filtrar soporte vs comercial (sobre chats limpios)
+    support   = [c for c in chats_clean if c.get("queueId","") in SUPPORT_QUEUES or not c.get("queueId")]
+    comercial = [c for c in chats_clean if c.get("queueId","") in COMERCIAL_QUEUES]
+    unassigned = [c for c in chats_clean if not c.get("agentId")]
+
+    # Chats abandonados: sin queue y sin agente (excluye campañas)
+    abandoned_chats = [c for c in chats_clean
+                       if not c.get("queueId","") and not c.get("agentId","")]
 
     # Candidatos: bot muted + agente asignado
     candidates = [c for c in chats if c.get("isBotMuted") and c.get("agentId")]
@@ -595,15 +666,18 @@ def compute_live_chat_metrics(chats: list, agents: list, now: datetime) -> dict:
 
     return {
         "all":              chats,
+        "all_clean":        chats_clean,
+        "campaigns":        campaigns_raw,
         "support":          support,
         "comercial":        comercial,
         "unassigned":       unassigned,
+        "abandoned_chats":  abandoned_chats,
         "pending":          pending_with_wait,
         "chats_per_agent":  chats_per_agent,
         "wait_per_agent":   wait_per_agent,
         "wa_expiring":      wa_expiring,
-        "queues":           Counter(c.get("queueId") or "Sin queue" for c in chats),
-        "countries":        Counter(c.get("country","?") for c in chats),
+        "queues":           Counter(c.get("queueId") or "Sin queue" for c in chats_clean),
+        "countries":        Counter(c.get("country","?") for c in chats_clean),
     }
 
 def compute_agent_productivity(df_kpis: pd.DataFrame, chats_per_agent: Counter,
@@ -893,6 +967,13 @@ with st.sidebar:
     st.markdown(f'<div class="sb-label">Filtros</div>', unsafe_allow_html=True)
     filter_queue = st.selectbox("Queue", ["Todas","Soporte N1","Comercial","_default_"],
                                  label_visibility="collapsed", key="fq")
+    exclude_campaigns = st.toggle(
+        "🚫 Excluir campañas comerciales",
+        value=True,
+        key="excl_camp",
+        help="Filtra chats iniciados por Kashio vía WhatsApp Template (outbound/comercial). "
+             "Se detectan por startingCause=WhatsAppTemplate o variables.platformContactId."
+    )
     st.markdown(f'<div style="font-size:.67rem;color:{MUTED};margin-top:6px">Última carga: {now_utc.strftime("%H:%M UTC")}</div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
@@ -914,10 +995,17 @@ ses_list = its(d_ses) if sc_ses == 200 else []
 if filter_queue != "Todas":
     cht_raw = [c for c in cht_raw if c.get("queueId","") == filter_queue]
 
-live     = compute_live_chat_metrics(cht_raw, ag_list, now_utc)
-df_kpis  = compute_session_kpis(ses_list)
-ag_prod  = compute_agent_productivity(df_kpis, live["chats_per_agent"], ag_list)
-alerts   = build_alerts(live, df_kpis, ag_prod, ag_list, now_utc, sla_frt_warn)
+# Aplicar filtro de campañas si está activado
+if exclude_campaigns:
+    ses_filtered = [s for s in ses_list if not is_campaign_session(s)]
+else:
+    ses_filtered = ses_list
+
+live       = compute_live_chat_metrics(cht_raw, ag_list, now_utc)
+df_kpis    = compute_session_kpis(ses_filtered)
+abandoned  = classify_abandoned_sessions(ses_filtered)
+ag_prod    = compute_agent_productivity(df_kpis, live["chats_per_agent"], ag_list)
+alerts     = build_alerts(live, df_kpis, ag_prod, ag_list, now_utc, sla_frt_warn)
 n_crit   = sum(1 for a in alerts if a["level"]=="crit")
 
 # ── Header con badge de alertas ──────────────────────────
@@ -1068,6 +1156,119 @@ with tab_rt:
             f3.update_layout(**L(margin=dict(l=60,r=30,t=10,b=10)))
             f3.update_traces(marker_cornerradius=4)
             pf(f3, 180)
+
+    # ── BANNER: campañas excluidas ────────────────────────
+    if exclude_campaigns and live.get("campaigns"):
+        n_camp = len(live["campaigns"])
+        st.markdown(
+            f'<div style="background:rgba(124,92,191,.07);border:1px solid rgba(124,92,191,.25);'
+            f'border-radius:8px;padding:9px 14px;font-size:.78rem;color:{C_PURPLE};margin:12px 0 0">'
+            f'🚫 <b>{n_camp}</b> chats de campañas comerciales excluidos de las métricas de soporte '
+            f'<span style="color:{MUTED}">(outbound / sin respuesta del usuario)</span></div>',
+            unsafe_allow_html=True
+        )
+
+    # ── ATENCIÓN PERDIDA ──────────────────────────────────
+    st.markdown("")
+    n_cnr = len(abandoned["closed_no_response"])
+    n_na  = len(abandoned["never_assigned"])
+    n_ab  = len(live.get("abandoned_chats", []))
+
+    c1, c2, c3 = st.columns(3)
+    with c1: kpi("Cerradas sin respuesta", n_cnr,
+                 "agente nunca respondió", "red",
+                 delta="⚠️ Atención urgente" if n_cnr > 0 else "✅ OK",
+                 delta_good=(n_cnr == 0))
+    with c2: kpi("Nunca asignadas (activas)", n_na,
+                 "esperando sin agente ni cierre", "orange")
+    with c3: kpi("Sin queue ni agente", n_ab,
+                 "chats sin atención del período", "coral")
+
+    st.markdown("")
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        sh(f"Cerradas sin respuesta — {n_cnr}",
+           "sesión cerrada sin que el agente respondiera")
+        if abandoned["closed_no_response"]:
+            rows_cnr = []
+            for s in abandoned["closed_no_response"]:
+                ci          = s.get("chat", {}).get("chat", {})
+                cid         = ci.get("chatId", "")
+                name        = s.get("chat", {}).get("firstName", "—")
+                t_start     = parse_dt(s.get("creationTime",""))
+                t_close_str = ""
+                for ev in s.get("events",[]):
+                    if ev["name"] == "conversation-close":
+                        t_close_str = ev.get("creationTime","")
+                t_close = parse_dt(t_close_str)
+                elapsed = fmt_mins((t_close - t_start).total_seconds()/60) \
+                          if (t_close and t_start) else "—"
+                rows_cnr.append({
+                    "Cliente":  name,
+                    "Inicio":   s.get("creationTime","")[:16].replace("T"," "),
+                    "Cierre":   t_close_str[:16].replace("T"," "),
+                    "Duración": elapsed,
+                    "Causa":    s.get("startingCause",""),
+                    "🔗 Chat":  chat_url(cid),
+                })
+            show_table(
+                pd.DataFrame(rows_cnr),
+                filename="cerradas_sin_respuesta.csv",
+                col_cfg={"🔗 Chat": st.column_config.LinkColumn(
+                    "🔗 Chat", display_text="Ver chat")},
+                key="dl_cnr",
+            )
+        else:
+            st.success("✅ Sin sesiones cerradas sin respuesta en el período.")
+
+    with col_b:
+        sh(f"Nunca asignadas (activas) — {n_na}",
+           "sin assigned-to-agent · conversación aún abierta")
+        if abandoned["never_assigned"]:
+            rows_na = []
+            for s in abandoned["never_assigned"]:
+                ci   = s.get("chat", {}).get("chat", {})
+                cid  = ci.get("chatId", "")
+                name = s.get("chat", {}).get("firstName", "—")
+                t0   = parse_dt(s.get("creationTime",""))
+                wait = fmt_mins((now_utc - t0).total_seconds()/60) if t0 else "—"
+                rows_na.append({
+                    "Cliente":   name,
+                    "Inicio":    s.get("creationTime","")[:16].replace("T"," "),
+                    "⏱ Espera": wait,
+                    "Causa":     s.get("startingCause",""),
+                    "🔗 Chat":   chat_url(cid),
+                })
+            show_table(
+                pd.DataFrame(rows_na),
+                filename="nunca_asignadas.csv",
+                col_cfg={"🔗 Chat": st.column_config.LinkColumn(
+                    "🔗 Chat", display_text="Ver chat")},
+                key="dl_na",
+            )
+        else:
+            st.success("✅ Sin conversaciones activas sin asignar.")
+
+    if live.get("abandoned_chats"):
+        sh(f"Chats sin queue ni agente — {n_ab}", "contactos sin atención del período")
+        rows_ab = []
+        for c in live["abandoned_chats"]:
+            cid = get_chat_id(c)
+            rows_ab.append({
+                "Cliente":    c.get("firstName","—"),
+                "País":       c.get("country","—"),
+                "Último msg": c.get("lastUserMessageDatetime","")[:16].replace("T"," "),
+                "🔗 Chat":    chat_url(cid),
+            })
+        show_table(
+            pd.DataFrame(rows_ab),
+            filename="chats_sin_atencion.csv",
+            col_cfg={"🔗 Chat": st.column_config.LinkColumn(
+                "🔗 Chat", display_text="Ver chat")},
+            key="dl_ab",
+        )
+
 
 # ══════════════════════════════════════════════════════════
 # TAB 2 — SLA & TIEMPOS
