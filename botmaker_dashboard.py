@@ -468,39 +468,84 @@ def compute_session_kpis(sessions: list) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
+def get_last_message_sender(chat_id: str, list_url: str = "") -> str:
+    """
+    Trae los últimos mensajes del chat y devuelve quién envió el último:
+    'user', 'agent', 'bot' o '' si no se pudo determinar.
+    Hace UNA sola llamada a la API con limit bajo para ser rápido.
+    """
+    try:
+        url    = list_url or f"{BASE_URL}/messages"
+        params = {} if list_url else {"chat-id": chat_id}
+        r = requests.get(url, headers=hdrs(), params=params, timeout=8)
+        if r.status_code != 200:
+            return ""
+        messages = its(r.json())
+        if not messages:
+            return ""
+        # Los mensajes vienen ordenados del más nuevo al más viejo
+        # Buscar el último mensaje que sea del usuario o del agente (ignorar bot)
+        for msg in messages:
+            sender = msg.get("from", "")
+            if sender in ("user", "agent"):
+                return sender
+        return ""
+    except Exception:
+        return ""
+
+
 def compute_live_chat_metrics(chats: list, agents: list, now: datetime) -> dict:
     """
     Métricas en tiempo real desde la lista de chats activos.
     Retorna dict con conteos y listas filtradas.
+
+    LÓGICA DE PENDIENTES (corregida):
+    Un chat está genuinamente pendiente de respuesta si:
+      1. isBotMuted = True  (agente tomó el control)
+      2. agentId está asignado
+      3. El ÚLTIMO mensaje fue del USUARIO (no del agente)
+    Para verificar (3) se consulta /messages por cada candidato.
+    Como la lista de candidatos suele ser pequeña (< 30), el costo es bajo.
     """
     ag_map = {a["id"]: a for a in agents}
 
     # Filtrar soporte vs comercial
-    support  = [c for c in chats if c.get("queueId","") in SUPPORT_QUEUES or not c.get("queueId")]
-    # Comercial separado
+    support   = [c for c in chats if c.get("queueId","") in SUPPORT_QUEUES or not c.get("queueId")]
     comercial = [c for c in chats if c.get("queueId","") in COMERCIAL_QUEUES]
+    unassigned = [c for c in chats if not c.get("agentId")]
 
-    unassigned  = [c for c in chats if not c.get("agentId")]
-    pending     = [c for c in chats if c.get("isBotMuted") and c.get("agentId")]
+    # Candidatos: bot muted + agente asignado
+    candidates = [c for c in chats if c.get("isBotMuted") and c.get("agentId")]
 
-    # Calcular tiempo de espera real para cada chat pendiente
+    # Para cada candidato verificar quién envió el último mensaje
     pending_with_wait = []
-    for c in pending:
-        lu = c.get("lastUserMessageDatetime","")
+    for c in candidates:
+        chat_id  = get_chat_id(c)
+        list_url = c.get("listMessagesURL", "")
+
+        last_sender = get_last_message_sender(chat_id, list_url)
+
+        # Solo incluir si el último mensaje fue del usuario
+        # Si no se pudo determinar (error de red, sin mensajes) se incluye
+        # para no perder chats reales — mejor falso positivo que falso negativo
+        if last_sender == "agent":
+            continue  # el agente ya respondió → no está pendiente
+
+        lu = c.get("lastUserMessageDatetime", "")
         dt = parse_dt(lu)
-        if dt:
-            wait_min = (now - dt).total_seconds() / 60
-        else:
-            wait_min = 0
-        aid = c.get("agentId","")
+        wait_min = (now - dt).total_seconds() / 60 if dt else 0
+
+        aid = c.get("agentId", "")
         ag  = ag_map.get(aid, {})
         pending_with_wait.append({
             **c,
-            "wait_min":   wait_min,
-            "wait_fmt":   fmt_mins(wait_min),
-            "sev_cls":    sev_cls(wait_min, SLA_WAIT_OK, SLA_WAIT_WARN),
-            "agent_name": ag.get("name","—"),
+            "wait_min":    wait_min,
+            "wait_fmt":    fmt_mins(wait_min),
+            "sev_cls":     sev_cls(wait_min, SLA_WAIT_OK, SLA_WAIT_WARN),
+            "agent_name":  ag.get("name", "—"),
+            "last_sender": last_sender,   # 'user' o ''
         })
+
     pending_with_wait.sort(key=lambda x: x["wait_min"], reverse=True)
 
     # Carga por agente
@@ -824,7 +869,7 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════
 # CARGA DE DATOS (una sola vez por render)
 # ══════════════════════════════════════════════════════════
-with st.spinner("Cargando datos…"):
+with st.spinner("Cargando datos… (verificando último mensaje por chat pendiente)"):
     sc_ag,  d_ag  = api_get("agents")
     sc_ag2, d_ag2 = api_get("agents", {"online":"true"})
     sc_ch,  d_ch  = api_get("chats",  {"from": FROM_24H})
@@ -919,14 +964,14 @@ with tab_rt:
             for c in live["pending"]:
                 cid = get_chat_id(c)
                 rows.append({
-                    "⏱ Espera":    c["wait_fmt"],
-                    "Sev":         "🔴" if c["wait_min"]>sla_wait_warn else ("🟠" if c["wait_min"]>SLA_WAIT_OK else "🟢"),
-                    "Agente":      c["agent_name"],
-                    "Cliente":     c.get("firstName","—"),
-                    "País":        c.get("country","—"),
-                    "Queue":       c.get("queueId","—"),
-                    "Último msg":  c.get("lastUserMessageDatetime","")[:16].replace("T"," "),
-                    "🔗 Chat":     chat_url(cid),
+                    "⏱ Espera":   c["wait_fmt"],
+                    "Sev":        "🔴" if c["wait_min"]>sla_wait_warn else ("🟠" if c["wait_min"]>SLA_WAIT_OK else "🟢"),
+                    "Agente":     c["agent_name"],
+                    "Cliente":    c.get("firstName","—"),
+                    "País":       c.get("country","—"),
+                    "Queue":      c.get("queueId","—"),
+                    "Últ. msg":   c.get("lastUserMessageDatetime","")[:16].replace("T"," "),
+                    "🔗 Chat":    chat_url(cid),
                 })
             show_table(
                 pd.DataFrame(rows),
