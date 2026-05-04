@@ -386,34 +386,113 @@ def is_campaign_session(session: dict) -> bool:
     """
     return session.get("startingCause", "") == "WhatsAppTemplate"
 
+def was_manually_closed_by_agent(session: dict) -> bool:
+    """
+    Retorna True si el agente cerró deliberadamente la conversación
+    (via intent 'Cerrar conversación' / flow). En ese caso el cierre
+    fue una acción explícita del agente, no un timeout automático.
+    El campo info del evento conversation-close incluye agentId +
+    executingIntents cuando es un cierre manual.
+    """
+    for e in session.get("events", []):
+        if e["name"] == "conversation-close":
+            info = e.get("info", {})
+            # Cierre manual tiene agentId Y executingIntents
+            if info.get("agentId") and info.get("executingIntents"):
+                return True
+    return False
+
+
+def agent_responded_in_session(session: dict) -> bool:
+    """
+    Verifica si el agente envió al menos un mensaje real dentro de esta sesión.
+    Llama al endpoint de mensajes del chat y filtra por timestamp >= session.creationTime.
+    Si la API falla, retorna True por precaución (no queremos falsos positivos).
+    """
+    ci       = session.get("chat", {}).get("chat", {})
+    chat_id  = ci.get("chatId", "")
+    if not chat_id:
+        return True  # no se puede verificar → asumir respondido
+
+    session_start = parse_dt(session.get("creationTime", ""))
+
+    try:
+        r = requests.get(
+            f"{BASE_URL}/messages",
+            headers=hdrs(),
+            params={"chat-id": chat_id, "long-term-search": "true"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return True   # API error → asumir respondido (falso positivo mejor que falso negativo aquí)
+
+        messages = its(r.json())
+        for msg in messages:
+            if msg.get("from") != "agent":
+                continue
+            # Verificar que el mensaje sea posterior al inicio de esta sesión
+            msg_dt = parse_dt(msg.get("creationTime", ""))
+            if msg_dt and session_start and msg_dt >= session_start:
+                return True   # agente envió mensaje en esta sesión
+        return False  # ningún mensaje de agente en esta sesión
+    except Exception:
+        return True   # error de red → asumir respondido
+
+
 def classify_abandoned_sessions(sessions: list) -> dict:
     """
-    Clasifica sesiones en categorías operativas para métricas de atención perdida.
-    Retorna dict con listas:
-      - closed_no_response : cerradas sin ningún reply de agente
-      - never_assigned     : sin evento assigned-to-agent (y sin cierre por bot)
-      - campaign_no_reply  : campaña donde el contacto no respondió
+    Clasifica sesiones cerradas donde el agente REALMENTE no respondió.
+
+    Lógica para "closed_no_response":
+      1. Tiene conversation-close
+      2. No tiene agent-action (evento)
+      3. El cierre NO fue manual por agente (no es spam/intencional)
+      4. Verificado por API: ningún mensaje de agente posterior al inicio de sesión
+
+    Lógica para "never_assigned":
+      - Sin assigned-to-agent Y sin cierre → esperando activamente
+
+    Los candidatos de "closed_no_response" se verifican en paralelo con la API.
     """
-    closed_no_resp  = []
-    never_assigned  = []
-    camp_no_reply   = []
+    # Fase 1: filtrar candidatos por eventos (rápido, sin API)
+    candidates_cnr = []
+    never_assigned = []
+    camp_no_reply  = []
 
     for s in sessions:
-        evs      = [e["name"] for e in s.get("events", [])]
-        is_camp  = is_campaign_session(s)
+        evs     = [e["name"] for e in s.get("events", [])]
+        is_camp = is_campaign_session(s)
         assigned = "assigned-to-agent" in evs
         replied  = "agent-action"       in evs
         closed   = "conversation-close" in evs
 
         if is_camp:
-            # Campaña sin respuesta del contacto (no hubo assigned-to-agent)
             if not assigned:
                 camp_no_reply.append(s)
         else:
             if closed and not replied:
-                closed_no_resp.append(s)
+                # Excluir cierres manuales/intencionales por agente
+                if not was_manually_closed_by_agent(s):
+                    candidates_cnr.append(s)
             if not assigned and not closed:
                 never_assigned.append(s)
+
+    # Fase 2: verificar con API de mensajes en paralelo (confirmar sin respuesta real)
+    closed_no_resp = []
+    if candidates_cnr:
+        with ThreadPoolExecutor(max_workers=min(8, len(candidates_cnr))) as ex:
+            future_to_session = {
+                ex.submit(agent_responded_in_session, s): s
+                for s in candidates_cnr
+            }
+            for future in as_completed(future_to_session):
+                s = future_to_session[future]
+                try:
+                    responded = future.result()
+                except Exception:
+                    responded = True  # error → asumir respondido
+                if not responded:
+                    closed_no_resp.append(s)
 
     return {
         "closed_no_response": closed_no_resp,
