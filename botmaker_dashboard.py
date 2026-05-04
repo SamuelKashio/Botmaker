@@ -33,6 +33,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta, timezone
 from collections import Counter, defaultdict
+import io
+import io
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -94,7 +96,6 @@ st.set_page_config(page_title="Kashio · Soporte", page_icon="⚡",
                    layout="wide", initial_sidebar_state="expanded")
 
 if "dark_mode" not in st.session_state: st.session_state.dark_mode = True
-if "live_on"   not in st.session_state: st.session_state.live_on   = False
 
 dark = st.session_state.dark_mode
 
@@ -298,33 +299,35 @@ def pf(f, height=None):
 def show_table(df: pd.DataFrame, filename: str, height=None,
                col_cfg: dict = None, key: str = None):
     """
-    Muestra un dataframe con botón de descarga CSV integrado.
-    Para columnas LinkColumn, el CSV incluye la URL completa (útil para copiar).
+    Muestra un dataframe con botón de descarga XLSX integrado.
+    Las columnas LinkColumn exportan la URL completa en el Excel.
     """
-    # CSV: convertir columnas con URLs a texto plano
-    df_csv = df.copy()
-    if col_cfg:
-        for col in col_cfg:
-            if col in df_csv.columns:
-                # Mantener la URL cruda en el CSV
-                pass
-    csv_bytes = df_csv.to_csv(index=False).encode("utf-8")
+    # Generar Excel en memoria con openpyxl
+    buf = io.BytesIO()
+    # Para el Excel, renombrar emoji en nombres de columna si hay problemas
+    df_xl = df.copy()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df_xl.to_excel(writer, index=False, sheet_name="Datos")
+    xlsx_bytes = buf.getvalue()
+
+    # Nombre del archivo siempre .xlsx
+    xl_filename = filename.replace(".csv", "").replace(".xlsx", "") + ".xlsx"
 
     # Layout: tabla + botón alineado arriba a la derecha
     hdr_l, hdr_r = st.columns([0.88, 0.12])
     with hdr_r:
         st.download_button(
-            label="⬇️ CSV",
-            data=csv_bytes,
-            file_name=filename,
-            mime="text/csv",
+            label="⬇️ Excel",
+            data=xlsx_bytes,
+            file_name=xl_filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             key=key or f"dl_{filename}_{id(df)}",
         )
     with hdr_l:
         kw = {"use_container_width": True, "hide_index": True}
-        if height:    kw["height"]        = height
-        if col_cfg:   kw["column_config"] = col_cfg
+        if height:  kw["height"]        = height
+        if col_cfg: kw["column_config"] = col_cfg
         st.dataframe(df, **kw)
 
 # ─────────────────────────────────────────────────────────
@@ -367,17 +370,13 @@ CAMPAIGN_TEMPLATE_FRAGMENT = "gracias por interesarte en nuestras soluciones de 
 def is_campaign_chat(chat: dict) -> bool:
     """
     Detecta si un chat es una campaña comercial outbound de Kashio.
-    Criterios (cualquiera es suficiente):
-      1. variables.platformContactId existe → chat iniciado por Kashio vía API outbound
-      2. No tiene lastUserMessageDatetime → el usuario nunca respondió (solo recibió)
+    ÚNICO criterio confiable: variables.platformContactId
+    (identifica chats iniciados por Kashio vía API outbound/masivo).
+    NO usar ausencia de lastUserMessageDatetime porque hay chats orgánicos
+    legítimos en Soporte N1 que pueden no tener mensaje de usuario aún.
     """
     vars_ = chat.get("variables", {}) or {}
-    if "platformContactId" in vars_:
-        return True
-    # Sin mensaje de usuario = envío masivo sin respuesta
-    if not chat.get("lastUserMessageDatetime", ""):
-        return True
-    return False
+    return "platformContactId" in vars_
 
 def is_campaign_session(session: dict) -> bool:
     """
@@ -449,14 +448,10 @@ def classify_abandoned_sessions(sessions: list) -> dict:
       3. El cierre NO fue manual por agente (no es spam/intencional)
       4. Verificado por API: ningún mensaje de agente posterior al inicio de sesión
 
-    Lógica para "never_assigned":
-      - Sin assigned-to-agent Y sin cierre → esperando activamente
-
     Los candidatos de "closed_no_response" se verifican en paralelo con la API.
     """
     # Fase 1: filtrar candidatos por eventos (rápido, sin API)
     candidates_cnr = []
-    never_assigned = []
     camp_no_reply  = []
 
     for s in sessions:
@@ -474,8 +469,6 @@ def classify_abandoned_sessions(sessions: list) -> dict:
                 # Excluir cierres manuales/intencionales por agente
                 if not was_manually_closed_by_agent(s):
                     candidates_cnr.append(s)
-            if not assigned and not closed:
-                never_assigned.append(s)
 
     # Fase 2: verificar con API de mensajes en paralelo (confirmar sin respuesta real)
     closed_no_resp = []
@@ -496,7 +489,6 @@ def classify_abandoned_sessions(sessions: list) -> dict:
 
     return {
         "closed_no_response": closed_no_resp,
-        "never_assigned":     never_assigned,
         "campaign_no_reply":  camp_no_reply,
     }
 
@@ -688,11 +680,24 @@ def compute_live_chat_metrics(chats: list, agents: list, now: datetime) -> dict:
     # Filtrar soporte vs comercial (sobre chats limpios)
     support   = [c for c in chats_clean if c.get("queueId","") in SUPPORT_QUEUES or not c.get("queueId")]
     comercial = [c for c in chats_clean if c.get("queueId","") in COMERCIAL_QUEUES]
-    unassigned = [c for c in chats_clean if not c.get("agentId")]
+    # UNIFIED: todos los chats sin agente asignado (excluye campañas ya filtradas)
+    # Incluye tanto los que tienen mensaje de usuario como los que están en cola
+    # pero el usuario no ha escrito aún (ej: chats cerrados y reabiertos sin msg)
+    unattended_raw = [c for c in chats_clean if not c.get("agentId")]
 
-    # Chats abandonados: sin queue y sin agente (excluye campañas)
-    abandoned_chats = [c for c in chats_clean
-                       if not c.get("queueId","") and not c.get("agentId","")]
+    # Calcular tiempo de espera para cada unattended (desde último msg de usuario)
+    unattended = []
+    for c in unattended_raw:
+        lu = c.get("lastUserMessageDatetime", "") or c.get("creationTime", "")
+        dt = parse_dt(lu)
+        wm = (now - dt).total_seconds() / 60 if dt else 0
+        unattended.append({
+            **c,
+            "wait_min": wm,
+            "wait_fmt": fmt_mins(wm),
+            "sev_cls":  sev_cls(wm, SLA_WAIT_OK, SLA_WAIT_WARN),
+        })
+    unattended.sort(key=lambda x: x["wait_min"], reverse=True)
 
     # Candidatos: bot muted + agente asignado
     candidates = [c for c in chats if c.get("isBotMuted") and c.get("agentId")]
@@ -749,8 +754,7 @@ def compute_live_chat_metrics(chats: list, agents: list, now: datetime) -> dict:
         "campaigns":        campaigns_raw,
         "support":          support,
         "comercial":        comercial,
-        "unassigned":       unassigned,
-        "abandoned_chats":  abandoned_chats,
+        "unattended":       unattended,
         "pending":          pending_with_wait,
         "chats_per_agent":  chats_per_agent,
         "wait_per_agent":   wait_per_agent,
@@ -820,18 +824,20 @@ def build_alerts(live: dict, df_kpis: pd.DataFrame,
     alerts = []
     ag_map = {a["id"]: a for a in agents}
 
-    # 1. Chats sin asignar
-    n_unassigned = len(live["unassigned"])
-    if n_unassigned >= ALERT_UNASSIGNED_MAX:
+    # 1. Chats en espera sin agente (unificado)
+    n_unattended = len(live.get("unattended", []))
+    # Cuántos superan el SLA de espera
+    n_unt_warn = sum(1 for c in live.get("unattended", []) if c.get("wait_min",0) > SLA_WAIT_OK)
+    if n_unattended >= ALERT_UNASSIGNED_MAX:
         alerts.append({"level":"crit",
-            "title": f"🚨 {n_unassigned} chats sin asignar",
-            "body": "Supera el umbral máximo. Revisar cola y disponibilidad de agentes.",
-            "metric": n_unassigned})
-    elif n_unassigned > 0:
+            "title": f"🚨 {n_unattended} chats sin agente asignado",
+            "body": f"Supera el umbral ({ALERT_UNASSIGNED_MAX}). {n_unt_warn} llevan más de {SLA_WAIT_OK}min esperando.",
+            "metric": n_unattended})
+    elif n_unattended > 0:
         alerts.append({"level":"warn",
-            "title": f"⚠️ {n_unassigned} chats sin asignar",
-            "body": "Chats en espera de asignación.",
-            "metric": n_unassigned})
+            "title": f"⚠️ {n_unattended} chats sin agente asignado",
+            "body": f"{n_unt_warn} llevan más de {SLA_WAIT_OK}min esperando respuesta.",
+            "metric": n_unattended})
 
     # 2. Chats con espera crítica (> SLA_WAIT_WARN minutos)
     critical_waits = [p for p in live["pending"] if p["wait_min"] > SLA_WAIT_WARN]
@@ -859,10 +865,10 @@ def build_alerts(live: dict, df_kpis: pd.DataFrame,
         aid    = ag.get("id","")
         chats_n = live["chats_per_agent"].get(aid, 0)
         # Solo alertar si hay chats sin asignar Y el agente no tiene nada
-        if chats_n == 0 and n_unassigned > 0:
+        if chats_n == 0 and n_unattended > 0:
             alerts.append({"level":"info",
                 "title": f"ℹ️ {ag.get('name','?')} en línea sin chats asignados",
-                "body":  f"Hay {n_unassigned} chats esperando. Verificar si el agente está activo.",
+                "body":  f"Hay {n_unattended} chats esperando. Verificar si el agente está activo.",
                 "metric": 0})
 
     # 5. SLA FRT comprometido
@@ -1000,20 +1006,25 @@ with st.sidebar:
     with c3: st.markdown('<div style="padding-top:5px">🌙</div>', unsafe_allow_html=True)
     st.markdown('<hr>', unsafe_allow_html=True)
 
-    # ── LIVE ─────────────────────────────────────────────
-    st.markdown(f'<div class="sb-label">Monitor en vivo</div>', unsafe_allow_html=True)
-    live_on = st.toggle("🔴 Activar LIVE", value=st.session_state.live_on, key="live_tog")
-    if live_on != st.session_state.live_on:
-        st.session_state.live_on = live_on
+    # ── Refresco automático ──────────────────────────────
+    st.markdown(f'<div class="sb-label">Intervalo de refresco</div>', unsafe_allow_html=True)
+    rmap   = {"Manual": 0, "30 seg": 30, "1 min": 60, "2 min": 120, "5 min": 300}
+    rlabel = st.selectbox("", list(rmap.keys()), index=0,
+                          label_visibility="collapsed", key="rinterval")
+    rsecs  = rmap[rlabel]
+    live_on = rsecs > 0
     if live_on:
-        rmap = {"30 seg":30,"1 min":60,"2 min":120,"5 min":300}
-        rlabel = st.selectbox("Intervalo", list(rmap.keys()), index=1, label_visibility="collapsed", key="rinterval")
-        rsecs  = rmap[rlabel]
-        if HAS_AUTOREFRESH: st_autorefresh(interval=rsecs*1000, limit=None, key="live_ar")
+        if HAS_AUTOREFRESH:
+            st_autorefresh(interval=rsecs * 1000, limit=None, key="live_ar")
         now_s = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        st.markdown(f'<div style="font-size:.71rem;color:{C_RED};margin-top:3px"><span class="ld"></span>Cada {rlabel} · {now_s}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="font-size:.71rem;color:{C_RED};">' +
+            f'<span class="ld"></span>Actualizando cada {rlabel} · {now_s}</div>',
+            unsafe_allow_html=True)
     else:
-        if st.button("🔄 Refrescar"): st.rerun()
+        if st.button("🔄 Refrescar", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
     st.markdown('<hr>', unsafe_allow_html=True)
 
     # ── Período ──────────────────────────────────────────
@@ -1091,9 +1102,9 @@ n_crit   = sum(1 for a in alerts if a["level"]=="crit")
 alert_badge = f' <span style="background:{C_RED};color:#fff;font-size:.7rem;padding:2px 7px;border-radius:20px;font-weight:700">{n_crit} ⚠</span>' if n_crit else ""
 st.markdown(f"""<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
   <div style="font-family:'Syne',sans-serif;font-size:1.4rem;font-weight:800;color:{TEXT}">
-    {"<span class='ld'></span>" if live_on else ""}Dashboard Soporte{alert_badge}
+    Dashboard Soporte{alert_badge}
   </div>
-  <div style="font-size:.74rem;color:{MUTED}">{'🔴 EN VIVO' if live_on else f'{d_from} → {d_to}'}</div>
+  <div style="font-size:.74rem;color:{MUTED}">{d_from} → {d_to}</div>
 </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
@@ -1116,14 +1127,17 @@ tab_rt, tab_sla, tab_team, tab_shifts, tab_alerts, tab_trends, tab_ai = st.tabs(
 with tab_rt:
     # KPI row — métricas de cola en tiempo real
     k1,k2,k3,k4,k5,k6 = st.columns(6)
-    n_unassigned = len(live["unassigned"])
+    n_unattended = len(live.get("unattended", []))
     n_pending    = len(live["pending"])
     n_online     = len(ag_on)
-    max_wait     = live["pending"][0]["wait_min"] if live["pending"] else 0
+    # Max wait: el peor caso entre pendientes (con agente) y sin agente
+    max_wait_pend = live["pending"][0]["wait_min"] if live["pending"] else 0
+    max_wait_unt  = live["unattended"][0]["wait_min"] if live.get("unattended") else 0
+    max_wait      = max(max_wait_pend, max_wait_unt)
 
-    with k1: kpi("Sin asignar",    n_unassigned,  "chats esperando agente", "red",
-                 delta=f"⚠️ Umbral: {ALERT_UNASSIGNED_MAX}" if n_unassigned >= ALERT_UNASSIGNED_MAX else "✅ OK",
-                 delta_good=(n_unassigned < ALERT_UNASSIGNED_MAX))
+    with k1: kpi("En espera sin agente", n_unattended, "sin agentId · usuario escribió", "red",
+                 delta=f"⚠️ Umbral: {ALERT_UNASSIGNED_MAX}" if n_unattended >= ALERT_UNASSIGNED_MAX else "✅ OK",
+                 delta_good=(n_unattended < ALERT_UNASSIGNED_MAX))
     with k2: kpi("Soporte N1",     len(live["support"]), "en cola soporte", "orange")
     with k3: kpi("Comercial",      len(live["comercial"]), "en cola comercial", "blue")
     with k4: kpi("Pend. respuesta",n_pending, "bot muted + agente", "purple")
@@ -1180,28 +1194,31 @@ with tab_rt:
         else:
             st.success("✅ Sin chats pendientes de respuesta.")
 
-        sh(f"Sin asignar — {n_unassigned}", "chats sin agentId · últimas 24h")
-        if live["unassigned"]:
+        sh(f"Detalle — {n_unattended} chats sin agente",
+           "ordenado por tiempo de espera")
+        if live.get("unattended"):
             rows = []
-            for c in live["unassigned"]:
+            for c in live["unattended"]:
                 cid = get_chat_id(c)
                 rows.append({
+                    "⏱ Espera":   c["wait_fmt"],
+                    "Sev":        "🔴" if c["wait_min"]>sla_wait_warn else ("🟠" if c["wait_min"]>SLA_WAIT_OK else "🟢"),
                     "Nombre":     c.get("firstName","—"),
                     "País":       c.get("country","—"),
-                    "Queue":      c.get("queueId","—"),
+                    "Queue":      c.get("queueId","") or "Sin queue",
                     "🪟 WA":      "✅" if c.get("whatsAppWindowCloseDatetime","")>now_utc.isoformat()[:19] else "❌",
                     "Último msg": c.get("lastUserMessageDatetime","")[:16].replace("T"," "),
                     "🔗 Chat":    chat_url(cid),
                 })
             show_table(
                 pd.DataFrame(rows),
-                filename="sin_asignar.csv",
-                height=min(38*len(rows)+38, 300),
+                filename="en_espera_sin_agente.csv",
+                height=min(38*len(rows)+38, 360),
                 col_cfg={"🔗 Chat": st.column_config.LinkColumn("🔗 Chat", display_text="Ver chat")},
-                key="dl_sin_asignar",
+                key="dl_unattended",
             )
         else:
-            st.success("✅ Sin chats sin asignar.")
+            st.success("✅ Sin chats esperando asignación.")
 
     with col_r:
         sh("Por queue")
@@ -1249,19 +1266,14 @@ with tab_rt:
 
     # ── ATENCIÓN PERDIDA ──────────────────────────────────
     st.markdown("")
-    n_cnr = len(abandoned["closed_no_response"])
-    n_na  = len(abandoned["never_assigned"])
-    n_ab  = len(live.get("abandoned_chats", []))
+    n_cnr        = len(abandoned["closed_no_response"])
+    n_unattended = len(live.get("unattended", []))
 
-    c1, c2, c3 = st.columns(3)
-    with c1: kpi("Cerradas sin respuesta", n_cnr,
-                 "agente nunca respondió", "red",
-                 delta="⚠️ Atención urgente" if n_cnr > 0 else "✅ OK",
-                 delta_good=(n_cnr == 0))
-    with c2: kpi("Nunca asignadas (activas)", n_na,
-                 "esperando sin agente ni cierre", "orange")
-    with c3: kpi("Sin queue ni agente", n_ab,
-                 "chats sin atención del período", "coral")
+    # Solo mostrar KPI de cerradas sin respuesta (en espera sin agente ya está arriba)
+    kpi("Cerradas sin respuesta", n_cnr,
+        "timeout automático · el agente nunca respondió", "red",
+        delta="⚠️ Atención urgente" if n_cnr > 0 else "✅ OK",
+        delta_good=(n_cnr == 0))
 
     st.markdown("")
     col_a, col_b = st.columns(2)
@@ -1302,51 +1314,7 @@ with tab_rt:
             st.success("✅ Sin sesiones cerradas sin respuesta en el período.")
 
     with col_b:
-        sh(f"Nunca asignadas (activas) — {n_na}",
-           "sin assigned-to-agent · conversación aún abierta")
-        if abandoned["never_assigned"]:
-            rows_na = []
-            for s in abandoned["never_assigned"]:
-                ci   = s.get("chat", {}).get("chat", {})
-                cid  = ci.get("chatId", "")
-                name = s.get("chat", {}).get("firstName", "—")
-                t0   = parse_dt(s.get("creationTime",""))
-                wait = fmt_mins((now_utc - t0).total_seconds()/60) if t0 else "—"
-                rows_na.append({
-                    "Cliente":   name,
-                    "Inicio":    s.get("creationTime","")[:16].replace("T"," "),
-                    "⏱ Espera": wait,
-                    "Causa":     s.get("startingCause",""),
-                    "🔗 Chat":   chat_url(cid),
-                })
-            show_table(
-                pd.DataFrame(rows_na),
-                filename="nunca_asignadas.csv",
-                col_cfg={"🔗 Chat": st.column_config.LinkColumn(
-                    "🔗 Chat", display_text="Ver chat")},
-                key="dl_na",
-            )
-        else:
-            st.success("✅ Sin conversaciones activas sin asignar.")
-
-    if live.get("abandoned_chats"):
-        sh(f"Chats sin queue ni agente — {n_ab}", "contactos sin atención del período")
-        rows_ab = []
-        for c in live["abandoned_chats"]:
-            cid = get_chat_id(c)
-            rows_ab.append({
-                "Cliente":    c.get("firstName","—"),
-                "País":       c.get("country","—"),
-                "Último msg": c.get("lastUserMessageDatetime","")[:16].replace("T"," "),
-                "🔗 Chat":    chat_url(cid),
-            })
-        show_table(
-            pd.DataFrame(rows_ab),
-            filename="chats_sin_atencion.csv",
-            col_cfg={"🔗 Chat": st.column_config.LinkColumn(
-                "🔗 Chat", display_text="Ver chat")},
-            key="dl_ab",
-        )
+        st.info("ℹ️ Los chats en espera sin agente se muestran en la sección superior de esta pestaña, ordenados por tiempo de espera.")
 
 
 # ══════════════════════════════════════════════════════════
@@ -1662,8 +1630,324 @@ with tab_shifts:
             fh.update_xaxes(tickangle=30)
             pf(fh)
 
+    # ══════════════════════════════════════════════════════
+    # CUMPLIMIENTO POR TURNO
+    # ══════════════════════════════════════════════════════
+    sh("📊 Cumplimiento por turno — chats atendidos vs no atendidos",
+       "chats que entraron en el horario de cada agente y cómo se gestionaron")
+
+    # Construir tabla de cumplimiento por turno
+    compliance_rows = []
+    for sname in active:
+        sd    = shift_stats[sname]
+        total = sd["total"]
+        if total == 0: continue
+
+        frt_vals = sd.get("frt_list", [])
+        frt_med  = round(np.median(frt_vals), 1) if frt_vals else None
+
+        # Chats atendidos = sesiones con agent-action (resp)
+        atendidos     = sd["resp"]
+        no_atendidos  = sd["no_asig"]   # nunca asignados
+        asig_no_resp  = sd["asig"] - sd["resp"]  # asignados pero sin respuesta
+
+        pct_atend = round(atendidos / total * 100, 1) if total else 0
+
+        # Determinar color de cumplimiento
+        if pct_atend >= 80:   compliance_level = "✅ Bueno"
+        elif pct_atend >= 50: compliance_level = "🟡 Regular"
+        else:                 compliance_level = "🔴 Bajo"
+
+        compliance_rows.append({
+            "Agente / Turno":     sname,
+            "Total chats":        total,
+            "Atendidos":          atendidos,
+            "Asig. sin respuesta":asig_no_resp,
+            "No asignados":       no_atendidos,
+            "% Atención":         f"{pct_atend}%",
+            "FRT mediano":        fmt_mins(frt_med) if frt_med else "—",
+            "Cumplimiento":       compliance_level,
+        })
+
+    if compliance_rows:
+        df_comp = pd.DataFrame(compliance_rows)
+
+        # KPIs de cumplimiento global
+        total_all   = sum(r["Total chats"] for r in compliance_rows)
+        atend_all   = sum(r["Atendidos"]   for r in compliance_rows)
+        no_asig_all = sum(r["No asignados"] for r in compliance_rows)
+        pct_global  = round(atend_all / total_all * 100, 1) if total_all else 0
+
+        k1, k2, k3, k4 = st.columns(4)
+        with k1: kpi("Chats totales (período)", total_all,  f"{d_from}–{d_to}", "blue")
+        with k2: kpi("Atendidos", atend_all, f"{pct_global}% del total",
+                     "green" if pct_global >= 80 else ("orange" if pct_global >= 50 else "red"))
+        with k3: kpi("No asignados a nadie", no_asig_all,
+                     "sin assigned-to-agent", "red")
+        with k4:
+            best_agent = max(compliance_rows, key=lambda r: float(r["% Atención"].replace("%","")))
+            kpi("Mayor cumplimiento", best_agent["Agente / Turno"].split()[0],
+                best_agent["% Atención"], "purple")
+
+        st.markdown("")
+        col_l, col_r = st.columns(2)
+
+        with col_l:
+            sh("Atendidos vs No atendidos por turno")
+            f_comp = go.Figure()
+            f_comp.add_trace(go.Bar(
+                name="Atendidos",
+                x=[r["Agente / Turno"] for r in compliance_rows],
+                y=[r["Atendidos"] for r in compliance_rows],
+                marker_color=C_GREEN, marker_cornerradius=4,
+            ))
+            f_comp.add_trace(go.Bar(
+                name="Asig. sin respuesta",
+                x=[r["Agente / Turno"] for r in compliance_rows],
+                y=[r["Asig. sin respuesta"] for r in compliance_rows],
+                marker_color=C_ORANGE, marker_cornerradius=4,
+            ))
+            f_comp.add_trace(go.Bar(
+                name="No asignados",
+                x=[r["Agente / Turno"] for r in compliance_rows],
+                y=[r["No asignados"] for r in compliance_rows],
+                marker_color=C_RED, marker_cornerradius=4,
+            ))
+            f_comp.update_layout(**L(barmode="stack", margin=dict(l=10,r=10,t=10,b=90)))
+            f_comp.update_xaxes(tickangle=35)
+            pf(f_comp)
+
+        with col_r:
+            sh("% de atención por turno")
+            pct_vals = [float(r["% Atención"].replace("%","")) for r in compliance_rows]
+            f_pct = px.bar(
+                pd.DataFrame({"Turno": [r["Agente / Turno"] for r in compliance_rows],
+                              "Pct": pct_vals}),
+                x="Turno", y="Pct",
+                color="Pct", color_continuous_scale=[C_RED, C_ORANGE, C_GREEN],
+                text=[f"{p:.0f}%" for p in pct_vals],
+            )
+            f_pct.add_hline(y=80, line_dash="dash", line_color=C_GREEN,
+                            annotation_text="Meta 80%")
+            f_pct.update_layout(**L(coloraxis_showscale=False,
+                                     yaxis_range=[0, 110],
+                                     margin=dict(l=10,r=10,t=10,b=90)))
+            f_pct.update_xaxes(tickangle=35)
+            f_pct.update_traces(marker_cornerradius=5, textposition="outside")
+            pf(f_pct)
+
+        sh("Tabla de cumplimiento por turno — detalle completo")
+        show_table(df_comp, filename="cumplimiento_por_turno.xlsx", key="dl_compliance")
+
+        # ── Capacidad por turno ─────────────────────────────
+        sh("Capacidad por turno — carga vs slots disponibles",
+           "chats por hora del turno vs agentes disponibles")
+
+        cap_rows = []
+        for sname in active:
+            sd      = shift_stats[sname]
+            # Buscar info del agente para ver sus slots
+            ag_info = next((a for a in ag_list if a.get("name","").lower() in sname.lower()
+                            or sname.lower() in a.get("name","").lower()), {})
+            slots   = ag_info.get("slots", 0) or 1
+            total   = sd["total"]
+            # Duración del turno: los turnos de soporte son de 8h
+            hours_in_shift = 8
+            chats_per_hour = round(total / hours_in_shift, 1) if hours_in_shift else 0
+            capacity_used  = round(chats_per_hour / slots * 100, 1) if slots else 0
+
+            cap_rows.append({
+                "Turno":           sname,
+                "Total chats":     total,
+                "Chats/hora":      chats_per_hour,
+                "Slots agente":    slots,
+                "Uso capacidad %": f"{capacity_used}%",
+                "Estado":          "🔴 Sobrecapacidad" if capacity_used > 100
+                                   else ("🟠 Alto" if capacity_used > 70
+                                         else "🟢 Normal"),
+            })
+
+        if cap_rows:
+            df_cap = pd.DataFrame(cap_rows)
+            col_lc, col_rc = st.columns(2)
+            with col_lc:
+                f_cap = px.bar(
+                    df_cap, x="Turno", y="Chats/hora",
+                    color="Chats/hora",
+                    color_continuous_scale=[C_GREEN, C_ORANGE, C_RED],
+                    text=df_cap["Chats/hora"].astype(str),
+                    title="Chats por hora por turno",
+                )
+                f_cap.update_layout(**L(coloraxis_showscale=False,
+                                         margin=dict(l=10,r=10,t=36,b=90)))
+                f_cap.update_xaxes(tickangle=35)
+                f_cap.update_traces(marker_cornerradius=5, textposition="outside")
+                pf(f_cap)
+            with col_rc:
+                show_table(df_cap, filename="capacidad_por_turno.xlsx", key="dl_cap_shift")
+
+
 
 # ══════════════════════════════════════════════════════════
+
+    # ══════════════════════════════════════════════════════
+    # SECCIÓN: CUMPLIMIENTO POR TURNO
+    # ══════════════════════════════════════════════════════
+    sh("👮 Cumplimiento del agente en su turno")
+    st.markdown(
+        f'<div style="font-size:.8rem;color:{MUTED};margin-bottom:12px">'
+        f'Chats que entraron en el horario de cada agente y cuántos fueron atendidos. '
+        f'Un chat "atendido" es aquel que recibió al menos una respuesta del agente '
+        f'(evento <code>agent-action</code>) en esa sesión.</div>',
+        unsafe_allow_html=True,
+    )
+
+    if ses_list:
+        # Calcular cumplimiento por turno
+        # Estructura: {shift_name: {total, atendidos, por_agente_correcto, no_atendidos, sesiones[]}}
+        compliance = defaultdict(lambda: {
+            "total": 0, "atendidos": 0, "por_agente_correcto": 0,
+            "no_atendidos": 0, "sesiones": []
+        })
+
+        for s in ses_list:
+            ct = s.get("creationTime", "")
+            if not ct: continue
+            try:
+                dt = datetime.fromisoformat(ct.replace("Z", "+00:00"))
+            except:
+                continue
+
+            shift_resp = get_shift_label(dt)   # agente responsable del turno
+            evs        = [e["name"] for e in s.get("events", [])]
+            atendido   = "agent-action" in evs
+
+            # ¿Quién lo atendió?
+            agente_real = ""
+            for e in s.get("events", []):
+                if e["name"] == "assigned-to-agent":
+                    agente_real = e.get("info", {}).get("agentName", "")
+                    break
+
+            compliance[shift_resp]["total"]       += 1
+            compliance[shift_resp]["sesiones"].append({
+                "fecha":          (dt + LIMA_OFFSET).strftime("%Y-%m-%d"),
+                "hora_lima":      (dt + LIMA_OFFSET).strftime("%H:%M"),
+                "atendido":       atendido,
+                "agente_real":    agente_real,
+                "agente_turno":   shift_resp,
+                "mismo_agente":   agente_real == shift_resp,
+                "chat_id":        s.get("chat", {}).get("chat", {}).get("chatId", ""),
+            })
+            if atendido:
+                compliance[shift_resp]["atendidos"] += 1
+            else:
+                compliance[shift_resp]["no_atendidos"] += 1
+            if agente_real == shift_resp:
+                compliance[shift_resp]["por_agente_correcto"] += 1
+
+        active_shifts = [s for s in SHIFT_ORDER if s in compliance]
+
+        # KPI cards de cumplimiento
+        cols_comp = st.columns(len(active_shifts) or 1)
+        for i, sname in enumerate(active_shifts):
+            cd    = compliance[sname]
+            total = cd["total"]
+            if total == 0: continue
+            pct_at  = round(100 * cd["atendidos"] / total)
+            pct_own = round(100 * cd["por_agente_correcto"] / total)
+            sc      = SHIFT_PAL.get(sname, C_BLUE)
+            col_cls = "green" if pct_at >= 80 else ("orange" if pct_at >= 50 else "red")
+            col_hex = C_GREEN  if pct_at >= 80 else (C_ORANGE  if pct_at >= 50 else C_RED)
+
+            with cols_comp[i]:
+                st.markdown(f"""<div class="kpi" style="border-top:3px solid {sc}">
+                  <div class="kpi-label" style="color:{sc}">{sname.split()[0]} {sname.split()[1] if len(sname.split())>1 else ''}</div>
+                  <div class="kpi-value" style="color:{col_hex};font-size:1.7rem">{pct_at}%</div>
+                  <div class="kpi-sub">atendidos ({cd['atendidos']}/{total})</div>
+                  <div style="font-size:.68rem;color:{MUTED};margin-top:5px">
+                    👤 Agente correcto: <b style="color:{TEXT}">{pct_own}%</b>
+                    ({cd['por_agente_correcto']}) &nbsp;
+                    ❌ Sin atender: <b style="color:{C_RED}">{cd['no_atendidos']}</b>
+                  </div></div>""", unsafe_allow_html=True)
+
+        st.markdown("")
+        col_cl, col_cr = st.columns(2)
+
+        with col_cl:
+            sh("% Atendidos por turno vs meta 80%")
+            comp_df = pd.DataFrame([{
+                "Turno":         s,
+                "% Atendidos":   round(100*compliance[s]["atendidos"]/compliance[s]["total"]) if compliance[s]["total"] else 0,
+                "% Agente propio":round(100*compliance[s]["por_agente_correcto"]/compliance[s]["total"]) if compliance[s]["total"] else 0,
+                "Total chats":   compliance[s]["total"],
+                "Sin atender":   compliance[s]["no_atendidos"],
+            } for s in active_shifts])
+
+            f_comp = go.Figure()
+            f_comp.add_trace(go.Bar(
+                name="% Atendidos", x=comp_df["Turno"], y=comp_df["% Atendidos"],
+                marker_color=[C_GREEN if v>=80 else (C_ORANGE if v>=50 else C_RED)
+                              for v in comp_df["% Atendidos"]],
+                text=comp_df["% Atendidos"].apply(lambda x: f"{x}%"),
+                textposition="outside", marker_cornerradius=4,
+            ))
+            f_comp.add_trace(go.Bar(
+                name="% Agente propio", x=comp_df["Turno"], y=comp_df["% Agente propio"],
+                marker_color=[f"{c}60" for c in
+                              [C_BLUE if v>=80 else (C_ORANGE if v>=50 else C_PURPLE)
+                               for v in comp_df["% Agente propio"]]],
+                text=comp_df["% Agente propio"].apply(lambda x: f"{x}%"),
+                textposition="outside", marker_cornerradius=4,
+            ))
+            f_comp.add_hline(y=80, line_dash="dash", line_color=C_GREEN,
+                             annotation_text="Meta 80%", annotation_position="right")
+            f_comp.update_layout(**L(barmode="group",
+                                      margin=dict(l=10,r=10,t=10,b=90), yaxis_range=[0,115]))
+            f_comp.update_xaxes(tickangle=30)
+            pf(f_comp)
+
+        with col_cr:
+            sh("Chats sin atender por turno")
+            miss_df = pd.DataFrame([{
+                "Turno":       s,
+                "Sin atender": compliance[s]["no_atendidos"],
+                "Total":       compliance[s]["total"],
+            } for s in active_shifts]).sort_values("Sin atender", reverse=False)
+
+            f_miss = px.bar(miss_df, x="Sin atender", y="Turno", orientation="h",
+                            color="Sin atender",
+                            color_continuous_scale=[C_GREEN, C_ORANGE, C_RED],
+                            text="Sin atender")
+            f_miss.update_layout(**L(coloraxis_showscale=False,
+                                      margin=dict(l=150, r=50, t=10, b=10)))
+            f_miss.update_traces(marker_cornerradius=4, textposition="outside")
+            pf(f_miss)
+
+        # ── Tabla de sesiones por turno con detalle ──────
+        sh("Detalle de sesiones por turno")
+        all_ses_rows = []
+        for sname in active_shifts:
+            for row in compliance[sname]["sesiones"]:
+                all_ses_rows.append({
+                    "Fecha":          row["fecha"],
+                    "Hora (Lima)":    row["hora_lima"],
+                    "Turno resp.":    row["agente_turno"],
+                    "Atendido":       "✅" if row["atendido"] else "❌",
+                    "Agente real":    row["agente_real"] or "—",
+                    "Mismo agente":   "✅" if row["mismo_agente"] else ("—" if not row["agente_real"] else "↔️ Otro"),
+                    "🔗 Chat":        chat_url(row["chat_id"]),
+                })
+
+        if all_ses_rows:
+            show_table(
+                pd.DataFrame(all_ses_rows),
+                filename="cumplimiento_por_turno.xlsx",
+                col_cfg={"🔗 Chat": st.column_config.LinkColumn("🔗 Chat", display_text="Ver chat")},
+                key="dl_compliance2",
+            )
+
+
 # TAB 5 — ALERTAS INTELIGENTES
 # ══════════════════════════════════════════════════════════
 with tab_alerts:
@@ -1701,9 +1985,10 @@ with tab_alerts:
 
     with col_l:
         # Gauge de carga de cola
-        total_slots = sum(a.get("slots",1) or 1 for a in ag_list if a.get("isOnline"))
-        total_chats = len(cht_raw)
-        load_pct    = round(total_chats / max(total_slots, 1) * 100)
+        total_slots    = sum(a.get("slots",1) or 1 for a in ag_list if a.get("isOnline"))
+        total_chats    = len(live.get("all_clean", cht_raw))   # excluye campañas
+        n_unattended_a = len(live.get("unattended", []))
+        load_pct       = round(total_chats / max(total_slots, 1) * 100)
         lc = C_RED if load_pct>90 else (C_ORANGE if load_pct>65 else C_GREEN)
 
         fg = go.Figure(go.Indicator(
@@ -1745,6 +2030,19 @@ with tab_alerts:
             show_table(pd.DataFrame(rows_cap), filename="capacidad_agentes.csv", key="dl_cap")
         else:
             st.info("No hay agentes en línea en este momento.")
+
+        # Resumen de chats en espera sin agente
+        if n_unattended_a > 0:
+            top_wait = live["unattended"][0]
+            st.markdown(
+                f'<div class="alert-warn" style="margin-top:10px">'
+                f'<div class="alert-title">⏳ {n_unattended_a} chats sin agente asignado</div>'
+                f'<div class="alert-body">El más antiguo lleva '
+                f'<b>{top_wait["wait_fmt"]}</b> esperando · '
+                f'{top_wait.get("firstName","?")} · {top_wait.get("queueId","Sin queue")}</div>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
 
     # ── Historial de espera de chats pendientes ───────────
     if live["pending"]:
