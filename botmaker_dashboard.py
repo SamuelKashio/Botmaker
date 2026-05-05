@@ -1636,157 +1636,122 @@ with tab_shifts:
     sh("📊 Cumplimiento por turno — chats atendidos vs no atendidos",
        "chats que entraron en el horario de cada agente y cómo se gestionaron")
 
-    # Construir tabla de cumplimiento por turno
-    compliance_rows = []
-    for sname in active:
-        sd    = shift_stats[sname]
-        total = sd["total"]
-        if total == 0: continue
+    # Recalcular shift_stats y active si df_kpis estaba vacío (no se calcularon arriba)
+    if df_kpis.empty:
+        _shift_stats = defaultdict(lambda:{"total":0,"asig":0,"resp":0,"cierre":0,
+                                           "no_asig":0,"frt_list":[],"aht_list":[]})
+        for s in ses_list:
+            ct = s.get("creationTime","")
+            if not ct: continue
+            try: _dt = datetime.fromisoformat(ct.replace("Z","+00:00"))
+            except: continue
+            _shift = get_shift_label(_dt)
+            _evs   = [e["name"] for e in s.get("events",[])]
+            _shift_stats[_shift]["total"] += 1
+            if "assigned-to-agent" in _evs: _shift_stats[_shift]["asig"]   += 1
+            else:                           _shift_stats[_shift]["no_asig"] += 1
+            if "agent-action"       in _evs: _shift_stats[_shift]["resp"]   += 1
+            if "conversation-close" in _evs: _shift_stats[_shift]["cierre"] += 1
+        _active = [s for s in SHIFT_ORDER if s in _shift_stats]
+    else:
+        _shift_stats = shift_stats
+        _active      = active
 
-        frt_vals = sd.get("frt_list", [])
-        frt_med  = round(np.median(frt_vals), 1) if frt_vals else None
-
-        # Chats atendidos = sesiones con agent-action (resp)
-        atendidos     = sd["resp"]
-        no_atendidos  = sd["no_asig"]   # nunca asignados
-        asig_no_resp  = sd["asig"] - sd["resp"]  # asignados pero sin respuesta
-
-        pct_atend = round(atendidos / total * 100, 1) if total else 0
-
-        # Determinar color de cumplimiento
-        if pct_atend >= 80:   compliance_level = "✅ Bueno"
-        elif pct_atend >= 50: compliance_level = "🟡 Regular"
-        else:                 compliance_level = "🔴 Bajo"
-
-        compliance_rows.append({
-            "Agente / Turno":     sname,
-            "Total chats":        total,
-            "Atendidos":          atendidos,
-            "Asig. sin respuesta":asig_no_resp,
-            "No asignados":       no_atendidos,
-            "% Atención":         f"{pct_atend}%",
-            "FRT mediano":        fmt_mins(frt_med) if frt_med else "—",
-            "Cumplimiento":       compliance_level,
-        })
-
-    if compliance_rows:
-        df_comp = pd.DataFrame(compliance_rows)
-
-        # KPIs de cumplimiento global
-        total_all   = sum(r["Total chats"] for r in compliance_rows)
-        atend_all   = sum(r["Atendidos"]   for r in compliance_rows)
-        no_asig_all = sum(r["No asignados"] for r in compliance_rows)
-        pct_global  = round(atend_all / total_all * 100, 1) if total_all else 0
-
-        k1, k2, k3, k4 = st.columns(4)
-        with k1: kpi("Chats totales (período)", total_all,  f"{d_from}–{d_to}", "blue")
-        with k2: kpi("Atendidos", atend_all, f"{pct_global}% del total",
-                     "green" if pct_global >= 80 else ("orange" if pct_global >= 50 else "red"))
-        with k3: kpi("No asignados a nadie", no_asig_all,
-                     "sin assigned-to-agent", "red")
-        with k4:
-            best_agent = max(compliance_rows, key=lambda r: float(r["% Atención"].replace("%","")))
-            kpi("Mayor cumplimiento", best_agent["Agente / Turno"].split()[0],
-                best_agent["% Atención"], "purple")
-
-        st.markdown("")
-        col_l, col_r = st.columns(2)
-
-        with col_l:
-            sh("Atendidos vs No atendidos por turno")
-            f_comp = go.Figure()
-            f_comp.add_trace(go.Bar(
-                name="Atendidos",
-                x=[r["Agente / Turno"] for r in compliance_rows],
-                y=[r["Atendidos"] for r in compliance_rows],
-                marker_color=C_GREEN, marker_cornerradius=4,
-            ))
-            f_comp.add_trace(go.Bar(
-                name="Asig. sin respuesta",
-                x=[r["Agente / Turno"] for r in compliance_rows],
-                y=[r["Asig. sin respuesta"] for r in compliance_rows],
-                marker_color=C_ORANGE, marker_cornerradius=4,
-            ))
-            f_comp.add_trace(go.Bar(
-                name="No asignados",
-                x=[r["Agente / Turno"] for r in compliance_rows],
-                y=[r["No asignados"] for r in compliance_rows],
-                marker_color=C_RED, marker_cornerradius=4,
-            ))
-            f_comp.update_layout(**L(barmode="stack", margin=dict(l=10,r=10,t=10,b=90)))
-            f_comp.update_xaxes(tickangle=35)
-            pf(f_comp)
-
-        with col_r:
-            sh("% de atención por turno")
-            pct_vals = [float(r["% Atención"].replace("%","")) for r in compliance_rows]
-            f_pct = px.bar(
-                pd.DataFrame({"Turno": [r["Agente / Turno"] for r in compliance_rows],
-                              "Pct": pct_vals}),
-                x="Turno", y="Pct",
-                color="Pct", color_continuous_scale=[C_RED, C_ORANGE, C_GREEN],
-                text=[f"{p:.0f}%" for p in pct_vals],
-            )
-            f_pct.add_hline(y=80, line_dash="dash", line_color=C_GREEN,
-                            annotation_text="Meta 80%")
-            f_pct.update_layout(**L(coloraxis_showscale=False,
-                                     yaxis_range=[0, 110],
-                                     margin=dict(l=10,r=10,t=10,b=90)))
-            f_pct.update_xaxes(tickangle=35)
-            f_pct.update_traces(marker_cornerradius=5, textposition="outside")
-            pf(f_pct)
-
-        sh("Tabla de cumplimiento por turno — detalle completo")
-        show_table(df_comp, filename="cumplimiento_por_turno.xlsx", key="dl_compliance")
-
-        # ── Capacidad por turno ─────────────────────────────
-        sh("Capacidad por turno — carga vs slots disponibles",
-           "chats por hora del turno vs agentes disponibles")
-
-        cap_rows = []
-        for sname in active:
-            sd      = shift_stats[sname]
-            # Buscar info del agente para ver sus slots
-            ag_info = next((a for a in ag_list if a.get("name","").lower() in sname.lower()
-                            or sname.lower() in a.get("name","").lower()), {})
-            slots   = ag_info.get("slots", 0) or 1
-            total   = sd["total"]
-            # Duración del turno: los turnos de soporte son de 8h
-            hours_in_shift = 8
-            chats_per_hour = round(total / hours_in_shift, 1) if hours_in_shift else 0
-            capacity_used  = round(chats_per_hour / slots * 100, 1) if slots else 0
-
-            cap_rows.append({
-                "Turno":           sname,
-                "Total chats":     total,
-                "Chats/hora":      chats_per_hour,
-                "Slots agente":    slots,
-                "Uso capacidad %": f"{capacity_used}%",
-                "Estado":          "🔴 Sobrecapacidad" if capacity_used > 100
-                                   else ("🟠 Alto" if capacity_used > 70
-                                         else "🟢 Normal"),
+    if not ses_list:
+        st.info("Sin datos de sesiones para calcular cumplimiento.")
+    elif not _active:
+        st.info("Sin turnos con datos para el período seleccionado.")
+    else:
+        compliance_rows = []
+        for sname in _active:
+            sd    = _shift_stats[sname]
+            total = sd["total"]
+            if total == 0: continue
+            frt_vals     = sd.get("frt_list", [])
+            frt_med      = round(np.median(frt_vals), 1) if frt_vals else None
+            atendidos    = sd["resp"]
+            no_atendidos = sd["no_asig"]
+            asig_no_resp = sd["asig"] - sd["resp"]
+            pct_atend    = round(atendidos / total * 100, 1) if total else 0
+            if pct_atend >= 80:   compliance_level = "✅ Bueno"
+            elif pct_atend >= 50: compliance_level = "🟡 Regular"
+            else:                 compliance_level = "🔴 Bajo"
+            compliance_rows.append({
+                "Agente / Turno":      sname,
+                "Total chats":         total,
+                "Atendidos":           atendidos,
+                "Asig. sin respuesta": asig_no_resp,
+                "No asignados":        no_atendidos,
+                "% Atención":          f"{pct_atend}%",
+                "FRT mediano":         fmt_mins(frt_med) if frt_med else "—",
+                "Cumplimiento":        compliance_level,
             })
 
-        if cap_rows:
-            df_cap = pd.DataFrame(cap_rows)
-            col_lc, col_rc = st.columns(2)
-            with col_lc:
-                f_cap = px.bar(
-                    df_cap, x="Turno", y="Chats/hora",
-                    color="Chats/hora",
-                    color_continuous_scale=[C_GREEN, C_ORANGE, C_RED],
-                    text=df_cap["Chats/hora"].astype(str),
-                    title="Chats por hora por turno",
+        if compliance_rows:
+            df_comp = pd.DataFrame(compliance_rows)
+            total_all   = sum(r["Total chats"]  for r in compliance_rows)
+            atend_all   = sum(r["Atendidos"]    for r in compliance_rows)
+            no_asig_all = sum(r["No asignados"] for r in compliance_rows)
+            pct_global  = round(atend_all / total_all * 100, 1) if total_all else 0
+
+            k1, k2, k3, k4 = st.columns(4)
+            with k1: kpi("Chats totales (período)", total_all,  f"{d_from}–{d_to}", "blue")
+            with k2: kpi("Atendidos", atend_all, f"{pct_global}% del total",
+                         "green" if pct_global >= 80 else ("orange" if pct_global >= 50 else "red"))
+            with k3: kpi("No asignados a nadie", no_asig_all, "sin assigned-to-agent", "red")
+            with k4:
+                best_agent = max(compliance_rows, key=lambda r: float(r["% Atención"].replace("%","")))
+                kpi("Mayor cumplimiento", best_agent["Agente / Turno"].split()[0],
+                    best_agent["% Atención"], "purple")
+
+            st.markdown("")
+            col_l, col_r = st.columns(2)
+
+            with col_l:
+                sh("Atendidos vs No atendidos por turno")
+                f_comp2 = go.Figure()
+                f_comp2.add_trace(go.Bar(
+                    name="Atendidos",
+                    x=[r["Agente / Turno"] for r in compliance_rows],
+                    y=[r["Atendidos"] for r in compliance_rows],
+                    marker_color=C_GREEN, marker_cornerradius=4,
+                ))
+                f_comp2.add_trace(go.Bar(
+                    name="Asig. sin respuesta",
+                    x=[r["Agente / Turno"] for r in compliance_rows],
+                    y=[r["Asig. sin respuesta"] for r in compliance_rows],
+                    marker_color=C_ORANGE, marker_cornerradius=4,
+                ))
+                f_comp2.add_trace(go.Bar(
+                    name="No asignados",
+                    x=[r["Agente / Turno"] for r in compliance_rows],
+                    y=[r["No asignados"] for r in compliance_rows],
+                    marker_color=C_RED, marker_cornerradius=4,
+                ))
+                f_comp2.update_layout(**L(barmode="stack", margin=dict(l=10,r=10,t=10,b=90)))
+                f_comp2.update_xaxes(tickangle=35)
+                pf(f_comp2)
+
+            with col_r:
+                sh("% de atención por turno")
+                pct_vals = [float(r["% Atención"].replace("%","")) for r in compliance_rows]
+                f_pct2 = px.bar(
+                    pd.DataFrame({"Turno":[r["Agente / Turno"] for r in compliance_rows],
+                                  "Pct": pct_vals}),
+                    x="Turno", y="Pct",
+                    color="Pct", color_continuous_scale=[C_RED, C_ORANGE, C_GREEN],
+                    text=[f"{p:.0f}%" for p in pct_vals],
                 )
-                f_cap.update_layout(**L(coloraxis_showscale=False,
-                                         margin=dict(l=10,r=10,t=36,b=90)))
-                f_cap.update_xaxes(tickangle=35)
-                f_cap.update_traces(marker_cornerradius=5, textposition="outside")
-                pf(f_cap)
-            with col_rc:
-                show_table(df_cap, filename="capacidad_por_turno.xlsx", key="dl_cap_shift")
+                f_pct2.add_hline(y=80, line_dash="dash", line_color=C_GREEN,
+                                  annotation_text="Meta 80%")
+                f_pct2.update_layout(**L(coloraxis_showscale=False, yaxis_range=[0,110],
+                                          margin=dict(l=10,r=10,t=10,b=90)))
+                f_pct2.update_xaxes(tickangle=35)
+                f_pct2.update_traces(marker_cornerradius=5, textposition="outside")
+                pf(f_pct2)
 
-
+            sh("Tabla de cumplimiento por turno")
+            show_table(df_comp, filename="cumplimiento_por_turno.xlsx", key="dl_compliance_t")
 
 # ══════════════════════════════════════════════════════════
 
