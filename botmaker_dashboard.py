@@ -1913,7 +1913,7 @@ with tab_shifts:
                 "Turno":       s,
                 "Sin atender": compliance[s]["no_atendidos"],
                 "Total":       compliance[s]["total"],
-            } for s in active_shifts]).sort_values("Sin atender", reverse=False)
+            } for s in active_shifts]).sort_values("Sin atender", ascending=True)
 
             f_miss = px.bar(miss_df, x="Sin atender", y="Turno", orientation="h",
                             color="Sin atender",
