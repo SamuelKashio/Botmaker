@@ -1894,9 +1894,9 @@ with tab_shifts:
             ))
             f_comp.add_trace(go.Bar(
                 name="% Agente propio", x=comp_df["Turno"], y=comp_df["% Agente propio"],
-                marker_color=[f"{c}60" for c in
-                              [C_BLUE if v>=80 else (C_ORANGE if v>=50 else C_PURPLE)
-                               for v in comp_df["% Agente propio"]]],
+                marker_color=[C_BLUE if v>=80 else (C_ORANGE if v>=50 else C_PURPLE)
+                              for v in comp_df["% Agente propio"]],
+                marker_opacity=0.45,
                 text=comp_df["% Agente propio"].apply(lambda x: f"{x}%"),
                 textposition="outside", marker_cornerradius=4,
             ))
