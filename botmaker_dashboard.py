@@ -2183,7 +2183,8 @@ with tab_analysis:
                             progress_bar.progress((idx + 1) / len(session_ids))
                         
                         if not all_messages:
-                            st.info("📊 No se encontraron mensajes en los chats.")n                        else:
+                            st.info("📊 No se encontraron mensajes en los chats.")
+                        else:
                             df_messages = pd.DataFrame(all_messages)
                             
                             # Renderizar análisis de chats
